@@ -1,6 +1,7 @@
 package blocksyncarchive
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -41,11 +42,18 @@ type IngestResult struct {
 	ReadyToArchiveThrough int64
 }
 
+// maxFetchedValidatorSets bounds the runtime cache of validator sets fetched
+// from ValidatorSetSource so a long-running node cannot accumulate one entry
+// per validated height indefinitely.
+const maxFetchedValidatorSets = 256
+
 type HotIngestor struct {
-	mu      sync.Mutex
-	store   *store.BlockStore
-	opts    IngestOptions
-	pending *types.Block
+	mu             sync.Mutex
+	store          *store.BlockStore
+	opts           IngestOptions
+	pending        *types.Block
+	fetchedSets    map[int64]*types.ValidatorSet
+	fetchedHeights []int64
 }
 
 type HotBlockReader struct {
@@ -224,7 +232,7 @@ func (i *HotIngestor) validateBlock(block *types.Block) error {
 			}
 		}
 		if vals != nil {
-			if !bytesEqual(block.ValidatorsHash, vals.Hash()) {
+			if !bytes.Equal(block.ValidatorsHash, vals.Hash()) {
 				return fmt.Errorf("block %d validators hash mismatch", block.Height)
 			}
 		}
@@ -261,11 +269,11 @@ func (i *HotIngestor) persistPending(next *types.Block) error {
 	if err != nil {
 		return fmt.Errorf("make part set for block %d: %w", i.pending.Height, err)
 	}
-	if !bytesEqual(next.LastCommit.BlockID.Hash, i.pending.Hash()) {
+	if !bytes.Equal(next.LastCommit.BlockID.Hash, i.pending.Hash()) {
 		return fmt.Errorf("block %d last commit does not reference pending block %d", next.Height, i.pending.Height)
 	}
 	if next.LastCommit.BlockID.PartSetHeader.Total != parts.Header().Total ||
-		!bytesEqual(next.LastCommit.BlockID.PartSetHeader.Hash, parts.Header().Hash) {
+		!bytes.Equal(next.LastCommit.BlockID.PartSetHeader.Hash, parts.Header().Hash) {
 		return fmt.Errorf("block %d last commit part set does not reference pending block %d", next.Height, i.pending.Height)
 	}
 	if i.opts.Validation == ValidationValidatorSet {
@@ -289,6 +297,9 @@ func (i *HotIngestor) validatorSetFor(height int64) (*types.ValidatorSet, error)
 	if vals := i.opts.ValidatorSets[height]; vals != nil {
 		return vals, nil
 	}
+	if vals := i.fetchedSets[height]; vals != nil {
+		return vals, nil
+	}
 	if i.opts.ValidatorSetSource == nil {
 		return nil, fmt.Errorf("missing validator set for height %d", height)
 	}
@@ -302,10 +313,16 @@ func (i *HotIngestor) validatorSetFor(height int64) (*types.ValidatorSet, error)
 	if err := vals.ValidateBasic(); err != nil {
 		return nil, fmt.Errorf("validator set from source at height %d: %w", height, err)
 	}
-	if i.opts.ValidatorSets == nil {
-		i.opts.ValidatorSets = make(map[int64]*types.ValidatorSet)
+	if i.fetchedSets == nil {
+		i.fetchedSets = make(map[int64]*types.ValidatorSet)
 	}
-	i.opts.ValidatorSets[height] = vals
+	if len(i.fetchedHeights) >= maxFetchedValidatorSets {
+		evict := i.fetchedHeights[0]
+		i.fetchedHeights = i.fetchedHeights[1:]
+		delete(i.fetchedSets, evict)
+	}
+	i.fetchedSets[height] = vals
+	i.fetchedHeights = append(i.fetchedHeights, height)
 	return vals, nil
 }
 
@@ -322,18 +339,6 @@ func validateValidatorSets(sets map[int64]*types.ValidatorSet) error {
 		}
 	}
 	return nil
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for idx := range a {
-		if a[idx] != b[idx] {
-			return false
-		}
-	}
-	return true
 }
 
 func (i *HotIngestor) withStoreState(result IngestResult) IngestResult {

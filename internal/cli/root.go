@@ -535,7 +535,21 @@ func newServeCommand() (*cobra.Command, error) {
 			if pexEnabled && addrBookFile == "" && len(splitCSV(seeds)) == 0 {
 				return errors.New("PEX requires at least one seed or an address book file")
 			}
-			if err := validateServeRuntimeConfig(requestLimit, coldWorkers, coldManifestCacheTTL, requestTimeout, statusRequestInterval, safetyWindow, archiveInterval, pruneInterval, retainBlocks, evidenceBlocks, evidenceDuration, segmentBlocks, validatorSetTimeout); err != nil {
+			if err := validateServeRuntimeConfig(serveRuntimeConfig{
+				requestLimit:          requestLimit,
+				coldWorkers:           coldWorkers,
+				coldManifestCacheTTL:  coldManifestCacheTTL,
+				requestTimeout:        requestTimeout,
+				statusRequestInterval: statusRequestInterval,
+				safetyWindow:          safetyWindow,
+				archiveInterval:       archiveInterval,
+				pruneInterval:         pruneInterval,
+				retainBlocks:          retainBlocks,
+				evidenceBlocks:        evidenceBlocks,
+				evidenceDuration:      evidenceDuration,
+				segmentBlocks:         segmentBlocks,
+				validatorSetTimeout:   validatorSetTimeout,
+			}); err != nil {
 				return err
 			}
 			if err := archive.ValidateCompression(compression); err != nil {
@@ -645,7 +659,7 @@ func newServeCommand() (*cobra.Command, error) {
 					return map[string]any{
 						liveMetricP2PPeers:             node.Reactor.PeerCount(),
 						liveMetricPeerBestHeight:       node.Reactor.BestPeerHeight(),
-						"blocksync_inflight_requests":  node.Reactor.InflightRequests(),
+						liveMetricInflight:             node.Reactor.InflightRequests(),
 						liveMetricBuffered:             node.Reactor.BufferedBlockResponses(),
 						"blocksync_request_timeouts":   node.Reactor.RequestTimeouts(),
 						"blocksync_hot_responses":      node.Reactor.HotBlockResponses(),
@@ -877,44 +891,24 @@ func splitCSV(value string) []string {
 	return out
 }
 
-func startLiveArchiveLoop(
-	ctx context.Context,
-	reader archive.BlockReader,
-	store archive.ObjectStore,
-	opts archive.LiveArchiveOptions,
-	safetyWindow int64,
-	interval time.Duration,
-) <-chan error {
-	errCh := make(chan error, 1)
-	if interval <= 0 {
-		interval = 30 * time.Second
+// tickLoop runs fn once and then re-runs it every interval until ctx is done
+// or fn returns false.
+func tickLoop(ctx context.Context, interval time.Duration, fn func() bool) {
+	if !fn() {
+		return
 	}
-	go func() {
-		runArchive := func() bool {
-			_, err := archive.ArchiveReadyFromHead(ctx, reader, store, opts, safetyWindow)
-			if err != nil {
-				errCh <- err
-				return false
-			}
-			return true
-		}
-		if !runArchive() {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
 			return
-		}
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
+		case <-ticker.C:
+			if !fn() {
 				return
-			case <-ticker.C:
-				if !runArchive() {
-					return
-				}
 			}
 		}
-	}()
-	return errCh
+	}
 }
 
 func startLiveIngestorMaintenanceLoop(
@@ -932,146 +926,38 @@ func startLiveIngestorMaintenanceLoop(
 	if archiveInterval <= 0 {
 		archiveInterval = 30 * time.Second
 	}
-	go func() {
-		lastPrune := time.Time{}
-		runMaintenance := func() bool {
-			archived, archiveErr := archive.ArchiveReadyFromHead(ctx, ingestor.BlockReader(), objectStore, archiveOpts, safetyWindow)
-			if archiveErr != nil {
-				if ctx.Err() != nil {
-					return false
-				}
-				stats.recordArchive(archived.BlocksArchived, archiveErr)
-				return true
-			}
-			stats.recordArchive(archived.BlocksArchived, nil)
-			if pruneInterval <= 0 || (!lastPrune.IsZero() && time.Since(lastPrune) < pruneInterval) {
-				return true
-			}
-			var pruned archive.PruneHotResult
-			pruneErr := ingestor.WithHotStore(func(blockStore *cmtstore.BlockStore) error {
-				var err error
-				pruned, err = runLivePrune(ctx, blockStore, objectStore, pruneOpts)
-				return err
-			})
-			if pruneErr != nil {
-				if ctx.Err() != nil {
-					return false
-				}
-				stats.recordPrune(pruned.Pruned, pruneErr)
-				return true
-			}
-			stats.recordPrune(pruned.Pruned, nil)
-			lastPrune = time.Now()
-			return true
-		}
-		if !runMaintenance() {
-			return
-		}
-		ticker := time.NewTicker(archiveInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if !runMaintenance() {
-					return
-				}
-			}
-		}
-	}()
-	return errCh
-}
-
-func startLiveMaintenanceLoop(
-	ctx context.Context,
-	blockStore *cmtstore.BlockStore,
-	objectStore archive.ObjectStore,
-	archiveOpts archive.LiveArchiveOptions,
-	safetyWindow int64,
-	archiveInterval time.Duration,
-	pruneOpts archive.PruneHotOptions,
-	pruneInterval time.Duration,
-	stats *liveMaintenanceStats,
-) <-chan error {
-	errCh := make(chan error, 1)
-	if archiveInterval <= 0 {
-		archiveInterval = 30 * time.Second
-	}
-	go func() {
-		lastPrune := time.Time{}
-		runMaintenance := func() bool {
-			archived, err := archive.ArchiveReadyFromHead(ctx, blockStore, objectStore, archiveOpts, safetyWindow)
-			stats.recordArchive(archived.BlocksArchived, err)
-			if err != nil {
-				return ctx.Err() == nil
-			}
-			if pruneInterval <= 0 || (!lastPrune.IsZero() && time.Since(lastPrune) < pruneInterval) {
-				return true
-			}
-			pruned, err := runLivePrune(ctx, blockStore, objectStore, pruneOpts)
-			stats.recordPrune(pruned.Pruned, err)
-			if err != nil {
-				return ctx.Err() == nil
-			}
-			lastPrune = time.Now()
-			return true
-		}
-		if !runMaintenance() {
-			return
-		}
-		ticker := time.NewTicker(archiveInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if !runMaintenance() {
-					return
-				}
-			}
-		}
-	}()
-	return errCh
-}
-
-func startLivePruneLoop(
-	ctx context.Context,
-	blockStore *cmtstore.BlockStore,
-	objectStore archive.ObjectStore,
-	opts archive.PruneHotOptions,
-	interval time.Duration,
-) <-chan error {
-	if interval <= 0 {
-		return nil
-	}
-	errCh := make(chan error, 1)
-	go func() {
-		runPrune := func() bool {
-			_, err := runLivePrune(ctx, blockStore, objectStore, opts)
-			if err != nil {
-				errCh <- err
+	lastPrune := time.Time{}
+	runMaintenance := func() bool {
+		archived, archiveErr := archive.ArchiveReadyFromHead(ctx, ingestor.BlockReader(), objectStore, archiveOpts, safetyWindow)
+		if archiveErr != nil {
+			if ctx.Err() != nil {
 				return false
 			}
+			stats.recordArchive(archived.BlocksArchived, archiveErr)
 			return true
 		}
-		if !runPrune() {
-			return
+		stats.recordArchive(archived.BlocksArchived, nil)
+		if pruneInterval <= 0 || (!lastPrune.IsZero() && time.Since(lastPrune) < pruneInterval) {
+			return true
 		}
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if !runPrune() {
-					return
-				}
+		var pruned archive.PruneHotResult
+		pruneErr := ingestor.WithHotStore(func(blockStore *cmtstore.BlockStore) error {
+			var err error
+			pruned, err = runLivePrune(ctx, blockStore, objectStore, pruneOpts)
+			return err
+		})
+		if pruneErr != nil {
+			if ctx.Err() != nil {
+				return false
 			}
+			stats.recordPrune(pruned.Pruned, pruneErr)
+			return true
 		}
-	}()
+		stats.recordPrune(pruned.Pruned, nil)
+		lastPrune = time.Now()
+		return true
+	}
+	go tickLoop(ctx, archiveInterval, runMaintenance)
 	return errCh
 }
 
@@ -1197,64 +1083,66 @@ func validationTrustModel(validationMode string, checkpointValues, validatorSetV
 	}
 }
 
-func validateServeRuntimeConfig(
-	requestLimit int,
-	coldWorkers int,
-	coldManifestCacheTTL time.Duration,
-	requestTimeout time.Duration,
-	statusRequestInterval time.Duration,
-	safetyWindow int64,
-	archiveInterval time.Duration,
-	pruneInterval time.Duration,
-	retainBlocks int64,
-	evidenceBlocks int64,
-	evidenceDuration time.Duration,
-	segmentBlocks int,
-	validatorSetTimeout time.Duration,
-) error {
-	if requestLimit <= 0 {
+type serveRuntimeConfig struct {
+	requestLimit          int
+	coldWorkers           int
+	coldManifestCacheTTL  time.Duration
+	requestTimeout        time.Duration
+	statusRequestInterval time.Duration
+	safetyWindow          int64
+	archiveInterval       time.Duration
+	pruneInterval         time.Duration
+	retainBlocks          int64
+	evidenceBlocks        int64
+	evidenceDuration      time.Duration
+	segmentBlocks         int
+	validatorSetTimeout   time.Duration
+}
+
+func validateServeRuntimeConfig(c serveRuntimeConfig) error {
+	if c.requestLimit <= 0 {
 		return errors.New("request limit must be positive")
 	}
-	if requestLimit > blocksyncarchive.MaxRequestLimit {
+	if c.requestLimit > blocksyncarchive.MaxRequestLimit {
 		return fmt.Errorf("request limit cannot exceed %d", blocksyncarchive.MaxRequestLimit)
 	}
-	if coldWorkers < 0 {
+	if c.coldWorkers < 0 {
 		return errors.New("cold workers cannot be negative")
 	}
-	if coldWorkers > blocksyncarchive.MaxRequestLimit {
+	if c.coldWorkers > blocksyncarchive.MaxRequestLimit {
 		return fmt.Errorf("cold workers cannot exceed %d", blocksyncarchive.MaxRequestLimit)
 	}
-	if coldManifestCacheTTL < 0 {
+	if c.coldManifestCacheTTL < 0 {
 		return errors.New("cold manifest cache TTL cannot be negative")
 	}
-	if requestTimeout <= 0 {
+	if c.requestTimeout <= 0 {
 		return errors.New("request timeout must be positive")
 	}
-	if statusRequestInterval < 0 {
+	if c.statusRequestInterval < 0 {
 		return errors.New("status request interval cannot be negative")
 	}
-	if safetyWindow < 0 {
+	if c.safetyWindow < 0 {
 		return errors.New("safety window cannot be negative")
 	}
-	if archiveInterval < 0 {
+	if c.archiveInterval < 0 {
 		return errors.New("archive interval cannot be negative")
 	}
-	if pruneInterval < 0 {
+	if c.pruneInterval < 0 {
 		return errors.New("prune interval cannot be negative")
 	}
-	if pruneInterval > 0 && retainBlocks <= 0 {
+	if c.pruneInterval > 0 && c.retainBlocks <= 0 {
 		return errors.New("retain blocks must be positive when live pruning is enabled")
 	}
-	if evidenceBlocks < 0 {
+	if c.evidenceBlocks < 0 {
 		return errors.New("evidence max age blocks cannot be negative")
 	}
-	if evidenceDuration < 0 {
+	if c.evidenceDuration < 0 {
 		return errors.New("evidence max age duration cannot be negative")
 	}
-	if err := validateSegmentBlocks(segmentBlocks); err != nil {
+	if err := validateSegmentBlocks(c.segmentBlocks); err != nil {
 		return err
 	}
-	if validatorSetTimeout <= 0 {
+	if c.validatorSetTimeout <= 0 {
 		return errors.New("validator set timeout must be positive")
 	}
 	return nil

@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -191,13 +192,7 @@ func enforceCacheLimit(blockDir string, maxBytes int64) error {
 		total += info.Size()
 	}
 	slices.SortFunc(files, func(a, b fileInfo) int {
-		if a.name < b.name {
-			return -1
-		}
-		if a.name > b.name {
-			return 1
-		}
-		return 0
+		return cmp.Compare(a.name, b.name)
 	})
 	for _, file := range files {
 		if total <= maxBytes {

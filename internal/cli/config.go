@@ -108,157 +108,103 @@ func applyServeConfig(cmd *cobra.Command, path string, settings serveSettings) e
 		}
 		return fmt.Errorf("decode config %q: trailing JSON after top-level object", path)
 	}
-	if cfg.Store != "" && !flagChanged(cmd, "store") {
-		settings.common.storeURL = cfg.Store
+	overlayString(cmd, "store", cfg.Store, &settings.common.storeURL)
+	overlayString(cmd, "prefix", cfg.Prefix, &settings.common.prefix)
+	overlayString(cmd, "chain-id", cfg.ChainID, &settings.common.chainID)
+	overlayString(cmd, "manifest-name", cfg.ManifestName, &settings.common.manifestName)
+	overlayString(cmd, "manifest-key", cfg.ManifestKey, &settings.common.manifestKey)
+	overlayString(cmd, "db-dir", cfg.DBDir, settings.dbDir)
+	overlayString(cmd, "db-backend", cfg.DBBackend, settings.dbBackend)
+	overlayString(cmd, "p2p-listen", cfg.P2PListen, settings.listenAddress)
+	overlayString(cmd, "moniker", cfg.Moniker, settings.moniker)
+	overlayString(cmd, "node-key-file", cfg.NodeKeyFile, settings.nodeKeyFile)
+	if err := overlayCSV(cmd, "persistent-peers", "persistent_peers", cfg.PersistentPeers, settings.persistentPeers); err != nil {
+		return err
 	}
-	if cfg.Prefix != "" && !flagChanged(cmd, "prefix") {
-		settings.common.prefix = cfg.Prefix
+	overlayPtr(cmd, "request-limit", cfg.RequestLimit, settings.requestLimit)
+	overlayPtr(cmd, "cold-workers", cfg.ColdWorkers, settings.coldWorkers)
+	if err := overlayDuration(cmd, "cold-manifest-cache-ttl", "cold_manifest_cache_ttl", cfg.ColdManifestCacheTTL, settings.coldManifestCacheTTL); err != nil {
+		return err
 	}
-	if cfg.ChainID != "" && !flagChanged(cmd, "chain-id") {
-		settings.common.chainID = cfg.ChainID
+	if err := overlayDuration(cmd, "request-timeout", "request_timeout", cfg.RequestTimeout, settings.requestTimeout); err != nil {
+		return err
 	}
-	if cfg.ManifestName != "" && !flagChanged(cmd, "manifest-name") {
-		settings.common.manifestName = cfg.ManifestName
+	if err := overlayDuration(cmd, "status-request-interval", "status_request_interval", cfg.StatusRequestInterval, settings.statusInterval); err != nil {
+		return err
 	}
-	if cfg.ManifestKey != "" && !flagChanged(cmd, "manifest-key") {
-		settings.common.manifestKey = cfg.ManifestKey
+	overlayPtr(cmd, "pex", cfg.PEX, settings.pexEnabled)
+	overlayString(cmd, "addr-book-file", cfg.AddrBookFile, settings.addrBookFile)
+	overlayPtr(cmd, "addr-book-strict", cfg.AddrBookStrict, settings.addrBookStrict)
+	if err := overlayCSV(cmd, "seeds", "seeds", cfg.Seeds, settings.seeds); err != nil {
+		return err
 	}
-	if cfg.DBDir != "" && !flagChanged(cmd, "db-dir") {
-		*settings.dbDir = cfg.DBDir
+	overlayPtr(cmd, "seed-mode", cfg.SeedMode, settings.seedMode)
+	if err := overlayCSV(cmd, "private-peer-ids", "private_peer_ids", cfg.PrivatePeerIDs, settings.privatePeerIDs); err != nil {
+		return err
 	}
-	if cfg.DBBackend != "" && !flagChanged(cmd, "db-backend") {
-		*settings.dbBackend = cfg.DBBackend
+	overlayString(cmd, "metrics-listen", cfg.MetricsListen, settings.metricsListen)
+	overlayPtr(cmd, "safety-window", cfg.SafetyWindow, settings.safetyWindow)
+	if err := overlayDuration(cmd, "archive-interval", "archive_interval", cfg.ArchiveInterval, settings.archiveInterval); err != nil {
+		return err
 	}
-	if cfg.P2PListen != "" && !flagChanged(cmd, "p2p-listen") {
-		*settings.listenAddress = cfg.P2PListen
+	if err := overlayDuration(cmd, "prune-interval", "prune_interval", cfg.PruneInterval, settings.pruneInterval); err != nil {
+		return err
 	}
-	if cfg.Moniker != "" && !flagChanged(cmd, "moniker") {
-		*settings.moniker = cfg.Moniker
+	overlayPtr(cmd, "retain-blocks", cfg.RetainBlocks, settings.retainBlocks)
+	overlayPtr(cmd, "evidence-max-age-blocks", cfg.EvidenceMaxAgeBlocks, settings.evidenceBlocks)
+	if err := overlayDuration(cmd, "evidence-max-age-duration", "evidence_max_age_duration", cfg.EvidenceMaxAgeDuration, settings.evidenceDuration); err != nil {
+		return err
 	}
-	if cfg.NodeKeyFile != "" && !flagChanged(cmd, "node-key-file") {
-		*settings.nodeKeyFile = cfg.NodeKeyFile
-	}
-	if len(cfg.PersistentPeers) > 0 && !flagChanged(cmd, "persistent-peers") {
-		value, err := configCSV("persistent_peers", cfg.PersistentPeers)
-		if err != nil {
-			return err
-		}
-		*settings.persistentPeers = value
-	}
-	if cfg.RequestLimit != nil && !flagChanged(cmd, "request-limit") {
-		*settings.requestLimit = *cfg.RequestLimit
-	}
-	if cfg.ColdWorkers != nil && !flagChanged(cmd, "cold-workers") {
-		*settings.coldWorkers = *cfg.ColdWorkers
-	}
-	if cfg.ColdManifestCacheTTL != "" && !flagChanged(cmd, "cold-manifest-cache-ttl") {
-		duration, err := time.ParseDuration(cfg.ColdManifestCacheTTL)
-		if err != nil {
-			return fmt.Errorf("config cold_manifest_cache_ttl: %w", err)
-		}
-		*settings.coldManifestCacheTTL = duration
-	}
-	if cfg.RequestTimeout != "" && !flagChanged(cmd, "request-timeout") {
-		duration, err := time.ParseDuration(cfg.RequestTimeout)
-		if err != nil {
-			return fmt.Errorf("config request_timeout: %w", err)
-		}
-		*settings.requestTimeout = duration
-	}
-	if cfg.StatusRequestInterval != "" && !flagChanged(cmd, "status-request-interval") {
-		duration, err := time.ParseDuration(cfg.StatusRequestInterval)
-		if err != nil {
-			return fmt.Errorf("config status_request_interval: %w", err)
-		}
-		*settings.statusInterval = duration
-	}
-	if cfg.PEX != nil && !flagChanged(cmd, "pex") {
-		*settings.pexEnabled = *cfg.PEX
-	}
-	if cfg.AddrBookFile != "" && !flagChanged(cmd, "addr-book-file") {
-		*settings.addrBookFile = cfg.AddrBookFile
-	}
-	if cfg.AddrBookStrict != nil && !flagChanged(cmd, "addr-book-strict") {
-		*settings.addrBookStrict = *cfg.AddrBookStrict
-	}
-	if len(cfg.Seeds) > 0 && !flagChanged(cmd, "seeds") {
-		value, err := configCSV("seeds", cfg.Seeds)
-		if err != nil {
-			return err
-		}
-		*settings.seeds = value
-	}
-	if cfg.SeedMode != nil && !flagChanged(cmd, "seed-mode") {
-		*settings.seedMode = *cfg.SeedMode
-	}
-	if len(cfg.PrivatePeerIDs) > 0 && !flagChanged(cmd, "private-peer-ids") {
-		value, err := configCSV("private_peer_ids", cfg.PrivatePeerIDs)
-		if err != nil {
-			return err
-		}
-		*settings.privatePeerIDs = value
-	}
-	if cfg.MetricsListen != "" && !flagChanged(cmd, "metrics-listen") {
-		*settings.metricsListen = cfg.MetricsListen
-	}
-	if cfg.SafetyWindow != nil && !flagChanged(cmd, "safety-window") {
-		*settings.safetyWindow = *cfg.SafetyWindow
-	}
-	if cfg.ArchiveInterval != "" && !flagChanged(cmd, "archive-interval") {
-		duration, err := time.ParseDuration(cfg.ArchiveInterval)
-		if err != nil {
-			return fmt.Errorf("config archive_interval: %w", err)
-		}
-		*settings.archiveInterval = duration
-	}
-	if cfg.PruneInterval != "" && !flagChanged(cmd, "prune-interval") {
-		duration, err := time.ParseDuration(cfg.PruneInterval)
-		if err != nil {
-			return fmt.Errorf("config prune_interval: %w", err)
-		}
-		*settings.pruneInterval = duration
-	}
-	if cfg.RetainBlocks != nil && !flagChanged(cmd, "retain-blocks") {
-		*settings.retainBlocks = *cfg.RetainBlocks
-	}
-	if cfg.EvidenceMaxAgeBlocks != nil && !flagChanged(cmd, "evidence-max-age-blocks") {
-		*settings.evidenceBlocks = *cfg.EvidenceMaxAgeBlocks
-	}
-	if cfg.EvidenceMaxAgeDuration != "" && !flagChanged(cmd, "evidence-max-age-duration") {
-		duration, err := time.ParseDuration(cfg.EvidenceMaxAgeDuration)
-		if err != nil {
-			return fmt.Errorf("config evidence_max_age_duration: %w", err)
-		}
-		*settings.evidenceDuration = duration
-	}
-	if cfg.SegmentBlocks != nil && !flagChanged(cmd, "segment-blocks") {
-		*settings.segmentBlocks = *cfg.SegmentBlocks
-	}
-	if cfg.Compression != "" && !flagChanged(cmd, "compression") {
-		*settings.compression = cfg.Compression
-	}
-	if cfg.Validation != "" && !flagChanged(cmd, "validation") {
-		*settings.validation = cfg.Validation
-	}
+	overlayPtr(cmd, "segment-blocks", cfg.SegmentBlocks, settings.segmentBlocks)
+	overlayString(cmd, "compression", cfg.Compression, settings.compression)
+	overlayString(cmd, "validation", cfg.Validation, settings.validation)
 	if len(cfg.Checkpoints) > 0 && !flagChanged(cmd, "checkpoint") {
 		*settings.checkpoints = cfg.Checkpoints
 	}
 	if len(cfg.ValidatorSets) > 0 && !flagChanged(cmd, "validator-set") {
 		*settings.validatorSets = cfg.ValidatorSets
 	}
-	if cfg.ValidatorSetRPC != "" && !flagChanged(cmd, "validator-set-rpc") {
-		*settings.validatorSetRPC = cfg.ValidatorSetRPC
+	overlayString(cmd, "validator-set-rpc", cfg.ValidatorSetRPC, settings.validatorSetRPC)
+	if err := overlayDuration(cmd, "validator-set-timeout", "validator_set_timeout", cfg.ValidatorSetTimeout, settings.validatorSetTimeout); err != nil {
+		return err
 	}
-	if cfg.ValidatorSetTimeout != "" && !flagChanged(cmd, "validator-set-timeout") {
-		duration, err := time.ParseDuration(cfg.ValidatorSetTimeout)
-		if err != nil {
-			return fmt.Errorf("config validator_set_timeout: %w", err)
-		}
-		*settings.validatorSetTimeout = duration
+	overlayPtr(cmd, "dry-run", cfg.DryRun, settings.dryRun)
+	return nil
+}
+
+func overlayString(cmd *cobra.Command, flag, value string, dst *string) {
+	if value != "" && !flagChanged(cmd, flag) {
+		*dst = value
 	}
-	if cfg.DryRun != nil && !flagChanged(cmd, "dry-run") {
-		*settings.dryRun = *cfg.DryRun
+}
+
+func overlayPtr[T any](cmd *cobra.Command, flag string, src *T, dst *T) {
+	if src != nil && !flagChanged(cmd, flag) {
+		*dst = *src
 	}
+}
+
+func overlayDuration(cmd *cobra.Command, flag, configName, raw string, dst *time.Duration) error {
+	if raw == "" || flagChanged(cmd, flag) {
+		return nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fmt.Errorf("config %s: %w", configName, err)
+	}
+	*dst = d
+	return nil
+}
+
+func overlayCSV(cmd *cobra.Command, flag, configName string, values []string, dst *string) error {
+	if len(values) == 0 || flagChanged(cmd, flag) {
+		return nil
+	}
+	value, err := configCSV(configName, values)
+	if err != nil {
+		return err
+	}
+	*dst = value
 	return nil
 }
 

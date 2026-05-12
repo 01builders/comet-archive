@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 
 	"github.com/cometbft/cometbft/proto/tendermint/types"
 	ctypes "github.com/cometbft/cometbft/types"
@@ -304,15 +305,7 @@ func ValidateArchiveKeys(prefix, chainID, manifestName string) error {
 }
 
 func cleanPrefix(prefix string) string {
-	if prefix == "" {
-		return defaultPrefix
-	}
-	for len(prefix) > 0 && prefix[0] == '/' {
-		prefix = prefix[1:]
-	}
-	for len(prefix) > 0 && prefix[len(prefix)-1] == '/' {
-		prefix = prefix[:len(prefix)-1]
-	}
+	prefix = strings.Trim(prefix, "/")
 	if prefix == "" {
 		return defaultPrefix
 	}

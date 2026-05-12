@@ -35,6 +35,7 @@ const (
 	liveMetricNextHeight     = "next_height"
 	liveMetricArchiveErrors  = "archive_errors"
 	liveMetricPruneErrors    = "prune_errors"
+	liveMetricInflight       = "blocksync_inflight_requests"
 	liveMetricBuffered       = "blocksync_buffered_responses"
 	liveMetricColdResponses  = "blocksync_cold_responses"
 	liveMetricColdErrors     = "blocksync_cold_errors"

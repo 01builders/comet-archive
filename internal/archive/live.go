@@ -137,7 +137,7 @@ func ArchiveReady(ctx context.Context, reader BlockReader, store ObjectStore, op
 		if last > end {
 			last = end
 		}
-		segment, uploaded, err := archiveLiveSegment(ctx, reader, store, opts, height, last)
+		segment, uploaded, err := buildAndUploadSegment(ctx, reader, store, opts.ChainID, opts.Prefix, opts.Compression, height, last)
 		if err != nil {
 			return LiveArchiveResult{}, err
 		}
@@ -179,11 +179,11 @@ func loadOrCreateLiveManifest(ctx context.Context, store ObjectStore, key, chain
 	return manifest, err
 }
 
-func archiveLiveSegment(
+func buildAndUploadSegment(
 	ctx context.Context,
 	reader BlockReader,
 	store ObjectStore,
-	opts LiveArchiveOptions,
+	chainID, prefix, compression string,
 	first int64,
 	last int64,
 ) (SegmentManifest, bool, error) {
@@ -196,8 +196,8 @@ func archiveLiveSegment(
 		if block == nil {
 			return SegmentManifest{}, false, fmt.Errorf("source block at height %d is missing", height)
 		}
-		if block.ChainID != opts.ChainID {
-			return SegmentManifest{}, false, fmt.Errorf("source block at height %d has chain ID %q, expected %q", height, block.ChainID, opts.ChainID)
+		if block.ChainID != chainID {
+			return SegmentManifest{}, false, fmt.Errorf("source block at height %d has chain ID %q, expected %q", height, block.ChainID, chainID)
 		}
 		record, err := BlockToRecord(block)
 		if err != nil {
@@ -205,11 +205,11 @@ func archiveLiveSegment(
 		}
 		records = append(records, record)
 	}
-	data, segment, err := EncodeSegment(records, opts.Compression)
+	data, segment, err := EncodeSegment(records, compression)
 	if err != nil {
 		return SegmentManifest{}, false, err
 	}
-	segment.Key = SegmentKey(opts.Prefix, opts.ChainID, segment)
+	segment.Key = SegmentKey(prefix, chainID, segment)
 	uploaded, err := putImmutableSegment(ctx, store, segment, data)
 	return segment, uploaded, err
 }

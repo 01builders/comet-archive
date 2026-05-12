@@ -2,6 +2,7 @@ package archive
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -255,13 +256,7 @@ func (s *S3ObjectStore) List(ctx context.Context, prefix string) ([]ObjectInfo, 
 		}
 	}
 	slices.SortFunc(infos, func(a, b ObjectInfo) int {
-		if a.Key < b.Key {
-			return -1
-		}
-		if a.Key > b.Key {
-			return 1
-		}
-		return 0
+		return cmp.Compare(a.Key, b.Key)
 	})
 	return infos, nil
 }

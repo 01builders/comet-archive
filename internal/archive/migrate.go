@@ -120,32 +120,9 @@ func Migrate(ctx context.Context, reader BlockReader, store ObjectStore, opts Mi
 		if last > end {
 			last = end
 		}
-		records := make([]BlockRecord, 0, last-height+1)
-		for h := height; h <= last; h++ {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return MigrationResult{}, ctxErr
-			}
-			block := reader.LoadBlock(h)
-			if block == nil {
-				return MigrationResult{}, fmt.Errorf("source block at height %d is missing", h)
-			}
-			if block.ChainID != opts.ChainID {
-				return MigrationResult{}, fmt.Errorf("source block at height %d has chain ID %q, expected %q", h, block.ChainID, opts.ChainID)
-			}
-			record, recordErr := BlockToRecord(block)
-			if recordErr != nil {
-				return MigrationResult{}, fmt.Errorf("encode block %d: %w", h, recordErr)
-			}
-			records = append(records, record)
-		}
-		data, segment, encodeErr := EncodeSegment(records, opts.Compression)
-		if encodeErr != nil {
-			return MigrationResult{}, encodeErr
-		}
-		segment.Key = SegmentKey(opts.Prefix, opts.ChainID, segment)
-		uploaded, putErr := putImmutableSegment(ctx, store, segment, data)
-		if putErr != nil {
-			return MigrationResult{}, putErr
+		segment, uploaded, segErr := buildAndUploadSegment(ctx, reader, store, opts.ChainID, opts.Prefix, opts.Compression, height, last)
+		if segErr != nil {
+			return MigrationResult{}, segErr
 		}
 		if uploaded {
 			result.Uploaded++

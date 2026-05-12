@@ -717,6 +717,7 @@ func newE2ENormalCometBFTKVNode(t *testing.T, listenAddress string) *cmtnode.Nod
 	cfg.Consensus.TimeoutPrecommit = 50 * time.Millisecond
 	cfg.Consensus.TimeoutPrecommitDelta = 10 * time.Millisecond
 	cfg.Consensus.TimeoutCommit = 250 * time.Millisecond
+	cfg.Consensus.SkipTimeoutCommit = false
 	cfg.Consensus.PeerGossipSleepDuration = 5 * time.Millisecond
 	cfg.Consensus.PeerQueryMaj23SleepDuration = 50 * time.Millisecond
 	cmtcfg.EnsureRoot(cfg.RootDir)

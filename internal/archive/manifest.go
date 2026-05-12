@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"cmp"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -53,13 +54,7 @@ func NewManifest(chainID string, segments []SegmentManifest) (Manifest, error) {
 		Segments:  append([]SegmentManifest(nil), segments...),
 	}
 	slices.SortFunc(m.Segments, func(a, b SegmentManifest) int {
-		if a.FirstHeight < b.FirstHeight {
-			return -1
-		}
-		if a.FirstHeight > b.FirstHeight {
-			return 1
-		}
-		return 0
+		return cmp.Compare(a.FirstHeight, b.FirstHeight)
 	})
 	if len(m.Segments) > 0 {
 		m.FirstHeight = m.Segments[0].FirstHeight

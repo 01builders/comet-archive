@@ -25,10 +25,9 @@ type ArchiveBlockSource struct {
 	manifestKey      string
 	manifestCacheTTL time.Duration
 
-	mu                sync.Mutex
-	cachedManifest    archive.Manifest
-	cachedManifestAt  time.Time
-	hasCachedManifest bool
+	mu               sync.Mutex
+	cachedManifest   archive.Manifest
+	cachedManifestAt time.Time
 }
 
 func NewArchiveBlockSource(store archive.ObjectStore, manifestKey string) (*ArchiveBlockSource, error) {
@@ -56,7 +55,7 @@ func (s *ArchiveBlockSource) SetManifestCacheTTL(ttl time.Duration) error {
 	defer s.mu.Unlock()
 	s.manifestCacheTTL = ttl
 	if ttl == 0 {
-		s.hasCachedManifest = false
+		s.cachedManifestAt = time.Time{}
 	}
 	return nil
 }
@@ -107,7 +106,7 @@ func (s *ArchiveBlockSource) LoadBlock(ctx context.Context, height int64) (*type
 func (s *ArchiveBlockSource) loadManifest(ctx context.Context) (archive.Manifest, error) {
 	now := time.Now()
 	s.mu.Lock()
-	if s.hasCachedManifest && s.manifestCacheTTL > 0 && now.Sub(s.cachedManifestAt) < s.manifestCacheTTL {
+	if !s.cachedManifestAt.IsZero() && s.manifestCacheTTL > 0 && now.Sub(s.cachedManifestAt) < s.manifestCacheTTL {
 		manifest := s.cachedManifest
 		s.mu.Unlock()
 		return manifest, nil
@@ -121,7 +120,6 @@ func (s *ArchiveBlockSource) loadManifest(ctx context.Context) (archive.Manifest
 	s.mu.Lock()
 	s.cachedManifest = manifest
 	s.cachedManifestAt = now
-	s.hasCachedManifest = true
 	s.mu.Unlock()
 	return manifest, nil
 }

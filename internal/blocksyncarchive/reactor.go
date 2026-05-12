@@ -40,6 +40,10 @@ type Reactor struct {
 	peers             map[PeerID]p2p.Peer
 	bufferedResponses map[int64]bufferedBlockResponse
 
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
 	requestTimeouts  atomic.Int64
 	hotResponses     atomic.Int64
 	coldResponses    atomic.Int64
@@ -103,18 +107,38 @@ func NewReactor(ingestor *HotIngestor, planner *RequestPlanner, opts ReactorOpti
 }
 
 func (r *Reactor) OnStart() error {
+	r.ctx, r.cancel = context.WithCancel(context.Background())
 	if r.opts.ColdBlockSource != nil {
 		for range r.opts.ColdRequestWorkers {
-			go r.coldBlockWorker()
+			r.wg.Add(1)
+			go func() {
+				defer r.wg.Done()
+				r.coldBlockWorker()
+			}()
 		}
 	}
 	if r.opts.RequestTimeout > 0 {
-		go r.requestTimeoutLoop()
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.requestTimeoutLoop()
+		}()
 	}
 	if r.opts.StatusRequestInterval > 0 {
-		go r.statusRequestLoop()
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.statusRequestLoop()
+		}()
 	}
 	return nil
+}
+
+func (r *Reactor) OnStop() {
+	if r.cancel != nil {
+		r.cancel()
+	}
+	r.wg.Wait()
 }
 
 func (*Reactor) GetChannels() []*p2p.ChannelDescriptor {
@@ -210,9 +234,16 @@ func (r *Reactor) ActiveColdBlockRequests() int64 {
 }
 
 func (r *Reactor) AdvertisedRange() PeerRange {
-	ctx, cancel := context.WithTimeout(context.Background(), r.opts.RequestTimeout)
+	ctx, cancel := context.WithTimeout(r.lifetimeContext(), r.opts.RequestTimeout)
 	defer cancel()
 	return r.currentAdvertisedRange(ctx)
+}
+
+func (r *Reactor) lifetimeContext() context.Context {
+	if r.ctx != nil {
+		return r.ctx
+	}
+	return context.Background()
 }
 
 func (r *Reactor) Receive(e p2p.Envelope) {
@@ -271,7 +302,7 @@ func (r *Reactor) respondToBlockRequest(peer p2p.Peer, height int64) {
 }
 
 func (r *Reactor) respondToColdBlockRequest(peer p2p.Peer, height int64) {
-	ctx, cancel := context.WithTimeout(context.Background(), r.opts.RequestTimeout)
+	ctx, cancel := context.WithTimeout(r.lifetimeContext(), r.opts.RequestTimeout)
 	defer cancel()
 	block, err := r.opts.ColdBlockSource.LoadBlock(ctx, height)
 	if err != nil || block == nil {
@@ -289,7 +320,7 @@ func (r *Reactor) respondToColdBlockRequest(peer p2p.Peer, height int64) {
 }
 
 func (r *Reactor) coldSourceAdvertisesHeight(height int64) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), r.opts.RequestTimeout)
+	ctx, cancel := context.WithTimeout(r.lifetimeContext(), r.opts.RequestTimeout)
 	defer cancel()
 	advertised, err := r.opts.ColdBlockSource.AdvertisedRange(ctx)
 	if err != nil {
@@ -315,6 +346,8 @@ func (r *Reactor) coldBlockWorker() {
 			r.coldActive.Add(1)
 			r.respondToColdBlockRequest(request.peer, request.height)
 			r.coldActive.Add(-1)
+		case <-r.ctx.Done():
+			return
 		case <-r.Quit():
 			return
 		}
@@ -435,7 +468,7 @@ func (r *Reactor) sendStatus(peer p2p.Peer) {
 	if peer == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), r.opts.RequestTimeout)
+	ctx, cancel := context.WithTimeout(r.lifetimeContext(), r.opts.RequestTimeout)
 	defer cancel()
 	advertised := r.currentAdvertisedRange(ctx)
 	peer.TrySend(p2p.Envelope{
@@ -501,6 +534,8 @@ func (r *Reactor) statusRequestLoop() {
 		select {
 		case <-ticker.C:
 			r.exchangeStatuses()
+		case <-r.ctx.Done():
+			return
 		case <-r.Quit():
 			return
 		}
@@ -526,6 +561,8 @@ func (r *Reactor) requestTimeoutLoop() {
 		select {
 		case <-ticker.C:
 			r.expireRequestsAndPlan()
+		case <-r.ctx.Done():
+			return
 		case <-r.Quit():
 			return
 		}
