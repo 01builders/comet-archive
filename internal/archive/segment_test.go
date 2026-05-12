@@ -147,6 +147,81 @@ func TestSegmentPayloadLimit(t *testing.T) {
 	}
 }
 
+func TestSegmentBlockIndexOffsetsMonotonic(t *testing.T) {
+	for _, compression := range []string{CompressionGzip, CompressionNone} {
+		t.Run(compression, func(t *testing.T) {
+			records := make([]BlockRecord, 5)
+			for i := range records {
+				records[i] = makeTestRecord(t, int64(i+1))
+			}
+			_, segment, err := EncodeSegment(records, compression)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if segment.Blocks[0].Offset != 0 {
+				t.Fatalf("first offset = %d, want 0", segment.Blocks[0].Offset)
+			}
+			for i := 1; i < len(segment.Blocks); i++ {
+				if segment.Blocks[i].Offset <= segment.Blocks[i-1].Offset {
+					t.Fatalf("offsets not strictly increasing at %d: %d <= %d", i, segment.Blocks[i].Offset, segment.Blocks[i-1].Offset)
+				}
+			}
+		})
+	}
+}
+
+func TestDecodeSegmentBlockFastPath(t *testing.T) {
+	for _, compression := range []string{CompressionGzip, CompressionNone} {
+		t.Run(compression, func(t *testing.T) {
+			records := make([]BlockRecord, 12)
+			for i := range records {
+				records[i] = makeTestRecord(t, int64(i+1))
+			}
+			data, segment, err := EncodeSegment(records, compression)
+			if err != nil {
+				t.Fatal(err)
+			}
+			segment.Key = SegmentKey("archive", testChainID, segment)
+			const target = int64(7)
+			block, err := DecodeSegmentBlock(data, segment, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if block.Height != target {
+				t.Fatalf("got height %d, want %d", block.Height, target)
+			}
+			for i := 1; i < len(segment.Blocks); i++ {
+				if segment.Blocks[i].Offset == 0 {
+					t.Fatalf("non-first offset at index %d is zero", i)
+				}
+			}
+		})
+	}
+}
+
+func TestDecodeSegmentBlockLegacyFallback(t *testing.T) {
+	records := make([]BlockRecord, 12)
+	for i := range records {
+		records[i] = makeTestRecord(t, int64(i+1))
+	}
+	data, segment, err := EncodeSegment(records, CompressionGzip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segment.Key = SegmentKey("archive", testChainID, segment)
+	for i := range segment.Blocks {
+		segment.Blocks[i].Offset = 0
+	}
+	const target = int64(6)
+	block, err := DecodeSegmentBlock(data, segment, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if block.Height != target {
+		t.Fatalf("got height %d, want %d", block.Height, target)
+	}
+}
+
 func TestValidateCompression(t *testing.T) {
 	for _, tc := range []struct {
 		name        string

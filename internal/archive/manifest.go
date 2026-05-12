@@ -42,6 +42,7 @@ type SegmentManifest struct {
 type BlockIndex struct {
 	Height int64  `json:"height"`
 	Hash   string `json:"hash"`
+	Offset int64  `json:"offset,omitempty"`
 }
 
 func NewManifest(chainID string, segments []SegmentManifest) (Manifest, error) {
