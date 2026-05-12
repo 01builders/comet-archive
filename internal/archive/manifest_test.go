@@ -44,6 +44,57 @@ func TestManifestValidationRejectsInconsistentTimestamps(t *testing.T) {
 	}
 }
 
+func TestManifestAppendSegmentInPlace(t *testing.T) {
+	recordsA := []BlockRecord{makeTestRecord(t, 1)}
+	_, segA, err := EncodeSegment(recordsA, CompressionGzip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segA.Key = "chains/" + testChainID + "/segments/a.cba"
+	recordsB := []BlockRecord{makeTestRecord(t, 2)}
+	_, segB, err := EncodeSegment(recordsB, CompressionGzip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segB.Key = "chains/" + testChainID + "/segments/b.cba"
+
+	manifest, err := NewManifest(testChainID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := manifest.CreatedAt
+	now := time.Now().UTC()
+	if err := manifest.AppendSegmentInPlace(segA, now); err != nil {
+		t.Fatalf("append first: %v", err)
+	}
+	if manifest.FirstHeight != 1 || manifest.LastHeight != 1 || len(manifest.Segments) != 1 {
+		t.Fatalf("manifest after first append: %+v", manifest)
+	}
+	if !manifest.CreatedAt.Equal(created) {
+		t.Fatalf("created_at changed: %v != %v", manifest.CreatedAt, created)
+	}
+	if err := manifest.AppendSegmentInPlace(segB, now.Add(time.Second)); err != nil {
+		t.Fatalf("append second: %v", err)
+	}
+	if manifest.LastHeight != 2 || len(manifest.Segments) != 2 {
+		t.Fatalf("manifest after second append: %+v", manifest)
+	}
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("manifest invalid after appends: %v", err)
+	}
+
+	// Non-contiguous segment must be rejected.
+	recordsD := []BlockRecord{makeTestRecord(t, 5)}
+	_, segD, err := EncodeSegment(recordsD, CompressionGzip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	segD.Key = "chains/" + testChainID + "/segments/d.cba"
+	if err := manifest.AppendSegmentInPlace(segD, now); err == nil || !strings.Contains(err.Error(), "expected 3") {
+		t.Fatalf("expected contiguity error, got %v", err)
+	}
+}
+
 func TestManifestValidationRejectsUnsafeChainID(t *testing.T) {
 	for _, chainID := range []string{
 		"../escape",

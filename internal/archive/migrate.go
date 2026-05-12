@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,10 @@ type MigrationOptions struct {
 	ManifestName  string
 	ManifestKey   string
 	Compression   string
+	// Concurrency bounds the worker pool used to verify completed segments in
+	// parallel at the end of a migration. Non-positive values select a
+	// sensible default (min(GOMAXPROCS, 8)).
+	Concurrency int
 }
 
 type MigrationResult struct {
@@ -137,7 +142,7 @@ func Migrate(ctx context.Context, reader BlockReader, store ObjectStore, opts Mi
 		}
 		height = last + 1
 	}
-	if verifyErr := verifyCompletedMigrationSegments(ctx, store, state.Segments); verifyErr != nil {
+	if verifyErr := verifyCompletedMigrationSegments(ctx, store, state.Segments, opts.Concurrency); verifyErr != nil {
 		return MigrationResult{}, verifyErr
 	}
 	manifest, err := NewManifest(opts.ChainID, state.Segments)
@@ -173,25 +178,93 @@ func validateExistingMigrationManifest(ctx context.Context, store ObjectStore, k
 	return nil
 }
 
-func verifyCompletedMigrationSegments(ctx context.Context, store ObjectStore, segments []SegmentManifest) error {
-	for _, segment := range segments {
-		info, err := store.Stat(ctx, segment.Key)
+func verifyCompletedMigrationSegments(ctx context.Context, store ObjectStore, segments []SegmentManifest, concurrency int) error {
+	if len(segments) == 0 {
+		return nil
+	}
+	workers := segmentConcurrency(concurrency)
+	if workers > len(segments) {
+		workers = len(segments)
+	}
+
+	errs := make([]error, len(segments))
+	jobs := make(chan int)
+
+	// derive a cancellable context so a worker failure aborts peers promptly
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if err := workerCtx.Err(); err != nil {
+					errs[i] = err
+					continue
+				}
+				errs[i] = verifyCompletedSegment(workerCtx, store, segments[i])
+				if errs[i] != nil {
+					cancel()
+				}
+			}
+		}()
+	}
+
+	for i := range segments {
+		select {
+		case <-workerCtx.Done():
+			// stop submitting once a failure (or external cancel) has occurred
+			close(jobs)
+			wg.Wait()
+			return firstSegmentError(errs, ctx.Err())
+		case jobs <- i:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	return firstSegmentError(errs, ctx.Err())
+}
+
+func verifyCompletedSegment(ctx context.Context, store ObjectStore, segment SegmentManifest) error {
+	info, err := store.Stat(ctx, segment.Key)
+	if err != nil {
+		return fmt.Errorf("stat completed segment %s: %w", segment.Key, err)
+	}
+	if info.Size != segment.SizeBytes {
+		return fmt.Errorf("completed segment %s size %d, expected %d", segment.Key, info.Size, segment.SizeBytes)
+	}
+	data, err := store.Get(ctx, segment.Key)
+	if err != nil {
+		return fmt.Errorf("get completed segment %s: %w", segment.Key, err)
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != segment.SHA256 {
+		return fmt.Errorf("completed segment %s checksum mismatch", segment.Key)
+	}
+	if _, err := DecodeSegment(data, segment); err != nil {
+		return fmt.Errorf("decode completed segment %s: %w", segment.Key, err)
+	}
+	return nil
+}
+
+// firstSegmentError returns the first non-nil error in segment order, preferring
+// real errors over context cancellation derived from a peer failure. If only
+// context errors remain and ctxErr is non-nil (the caller's context was
+// cancelled externally), that is returned instead.
+func firstSegmentError(errs []error, ctxErr error) error {
+	for _, err := range errs {
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+	}
+	if ctxErr != nil {
+		return ctxErr
+	}
+	for _, err := range errs {
 		if err != nil {
-			return fmt.Errorf("stat completed segment %s: %w", segment.Key, err)
-		}
-		if info.Size != segment.SizeBytes {
-			return fmt.Errorf("completed segment %s size %d, expected %d", segment.Key, info.Size, segment.SizeBytes)
-		}
-		data, err := store.Get(ctx, segment.Key)
-		if err != nil {
-			return fmt.Errorf("get completed segment %s: %w", segment.Key, err)
-		}
-		sum := sha256.Sum256(data)
-		if hex.EncodeToString(sum[:]) != segment.SHA256 {
-			return fmt.Errorf("completed segment %s checksum mismatch", segment.Key)
-		}
-		if _, err := DecodeSegment(data, segment); err != nil {
-			return fmt.Errorf("decode completed segment %s: %w", segment.Key, err)
+			return err
 		}
 	}
 	return nil

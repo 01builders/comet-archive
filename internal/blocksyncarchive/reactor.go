@@ -51,6 +51,12 @@ type Reactor struct {
 	coldErrors       atomic.Int64
 	coldQueueFull    atomic.Int64
 	coldActive       atomic.Int64
+
+	// cachedRange holds the most recently computed advertised range (hot + cold).
+	// It is refreshed by the statusRequestLoop and on ingestion progress
+	// (broadcastStatus) so that sendStatus / AddPeer never block the p2p
+	// receive goroutine on a cold-source roundtrip.
+	cachedRange atomic.Value // PeerRange
 }
 
 type coldBlockRequest struct {
@@ -108,6 +114,9 @@ func NewReactor(ingestor *HotIngestor, planner *RequestPlanner, opts ReactorOpti
 
 func (r *Reactor) OnStart() error {
 	r.ctx, r.cancel = context.WithCancel(context.Background())
+	// Seed the cached advertised range so the first sendStatus call from
+	// AddPeer doesn't see a zero cold range.
+	r.cachedRange.Store(PeerRange{})
 	if r.opts.ColdBlockSource != nil {
 		for range r.opts.ColdRequestWorkers {
 			r.wg.Add(1)
@@ -233,10 +242,26 @@ func (r *Reactor) ActiveColdBlockRequests() int64 {
 	return r.coldActive.Load()
 }
 
+// AdvertisedRange returns the currently cached advertised range, refreshing it
+// synchronously. External callers (CLI, tests) use this; the p2p Receive
+// goroutine reads cachedAdvertisedRange directly via sendStatus.
 func (r *Reactor) AdvertisedRange() PeerRange {
 	ctx, cancel := context.WithTimeout(r.lifetimeContext(), r.opts.RequestTimeout)
 	defer cancel()
-	return r.currentAdvertisedRange(ctx)
+	return r.refreshAdvertisedRange(ctx)
+}
+
+// cachedAdvertisedRange returns the most recently cached advertised range
+// without performing any blocking I/O. Safe to call from the p2p receive
+// goroutine. The hot component is always re-read so newly persisted heights
+// become visible immediately even before the next cache refresh.
+func (r *Reactor) cachedAdvertisedRange() PeerRange {
+	hot := r.ingestor.AdvertisedRange()
+	if r.opts.ColdBlockSource == nil {
+		return hot
+	}
+	cached, _ := r.cachedRange.Load().(PeerRange)
+	return mergeAdvertisedRanges(cached, hot)
 }
 
 func (r *Reactor) lifetimeContext() context.Context {
@@ -285,12 +310,10 @@ func (r *Reactor) respondToBlockRequest(peer p2p.Peer, height int64) {
 		return
 	}
 	if r.opts.ColdBlockSource != nil {
-		if !r.coldSourceAdvertisesHeight(height) {
-			if sendNoBlock(peer, height) {
-				r.noBlockResponses.Add(1)
-			}
-			return
-		}
+		// Enqueue immediately without an inline cold-source advertised-range
+		// check; the cold worker's LoadBlock already returns
+		// ErrColdBlockNotFound for heights outside the manifest. This keeps
+		// the p2p receive goroutine off any S3 round-trip.
 		if !r.enqueueColdBlockRequest(peer, height) {
 			r.coldQueueFull.Add(1)
 		}
@@ -304,6 +327,23 @@ func (r *Reactor) respondToBlockRequest(peer p2p.Peer, height int64) {
 func (r *Reactor) respondToColdBlockRequest(peer p2p.Peer, height int64) {
 	ctx, cancel := context.WithTimeout(r.lifetimeContext(), r.opts.RequestTimeout)
 	defer cancel()
+	// Check advertised range first in the worker (off the p2p Receive
+	// goroutine) so we can skip the LoadBlock fetch for unadvertised heights
+	// and surface manifest errors as cold errors.
+	advertised, err := r.opts.ColdBlockSource.AdvertisedRange(ctx)
+	if err != nil {
+		r.coldErrors.Add(1)
+		if sendNoBlock(peer, height) {
+			r.noBlockResponses.Add(1)
+		}
+		return
+	}
+	if !advertised.Contains(height) {
+		if sendNoBlock(peer, height) {
+			r.noBlockResponses.Add(1)
+		}
+		return
+	}
 	block, err := r.opts.ColdBlockSource.LoadBlock(ctx, height)
 	if err != nil || block == nil {
 		if err != nil && !errors.Is(err, ErrColdBlockNotFound) {
@@ -317,17 +357,6 @@ func (r *Reactor) respondToColdBlockRequest(peer p2p.Peer, height int64) {
 	if sendBlock(peer, block) {
 		r.coldResponses.Add(1)
 	}
-}
-
-func (r *Reactor) coldSourceAdvertisesHeight(height int64) bool {
-	ctx, cancel := context.WithTimeout(r.lifetimeContext(), r.opts.RequestTimeout)
-	defer cancel()
-	advertised, err := r.opts.ColdBlockSource.AdvertisedRange(ctx)
-	if err != nil {
-		r.coldErrors.Add(1)
-		return false
-	}
-	return advertised.Contains(height)
 }
 
 func (r *Reactor) enqueueColdBlockRequest(peer p2p.Peer, height int64) bool {
@@ -468,9 +497,7 @@ func (r *Reactor) sendStatus(peer p2p.Peer) {
 	if peer == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.lifetimeContext(), r.opts.RequestTimeout)
-	defer cancel()
-	advertised := r.currentAdvertisedRange(ctx)
+	advertised := r.cachedAdvertisedRange()
 	peer.TrySend(p2p.Envelope{
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message: &bcproto.StatusResponse{
@@ -480,15 +507,24 @@ func (r *Reactor) sendStatus(peer p2p.Peer) {
 	})
 }
 
-func (r *Reactor) currentAdvertisedRange(ctx context.Context) PeerRange {
+// refreshAdvertisedRange consults the cold source synchronously, updates the
+// cached cold range, and returns the merged hot+cold range. Called from the
+// status loop and from external AdvertisedRange callers — never from Receive.
+func (r *Reactor) refreshAdvertisedRange(ctx context.Context) PeerRange {
 	hot := r.ingestor.AdvertisedRange()
 	if r.opts.ColdBlockSource == nil {
 		return hot
 	}
 	cold, err := r.opts.ColdBlockSource.AdvertisedRange(ctx)
 	if err != nil {
+		// Fall back to the last known cached cold range so we don't regress
+		// the advertised heights on a transient cold-source error.
+		if cached, ok := r.cachedRange.Load().(PeerRange); ok {
+			return mergeAdvertisedRanges(cached, hot)
+		}
 		return hot
 	}
+	r.cachedRange.Store(cold)
 	return mergeAdvertisedRanges(cold, hot)
 }
 
@@ -543,6 +579,12 @@ func (r *Reactor) statusRequestLoop() {
 }
 
 func (r *Reactor) exchangeStatuses() {
+	// Refresh the cached cold-source advertised range here so subsequent
+	// sendStatus calls from Receive observe a recent snapshot without
+	// blocking on S3.
+	ctx, cancel := context.WithTimeout(r.lifetimeContext(), r.opts.RequestTimeout)
+	r.refreshAdvertisedRange(ctx)
+	cancel()
 	r.requestPeerStatuses()
 	r.broadcastStatus()
 }

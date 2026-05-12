@@ -4,11 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 )
 
 type VerifyOptions struct {
 	ManifestKey string
 	SampleEvery int64
+	// Concurrency bounds the worker pool used to verify segments in parallel.
+	// Non-positive values select a sensible default (min(GOMAXPROCS, 8)).
+	Concurrency int
 }
 
 type VerifyResult struct {
@@ -30,49 +35,111 @@ func Verify(ctx context.Context, store ObjectStore, opts VerifyOptions) (VerifyR
 	if err != nil {
 		return VerifyResult{}, err
 	}
-	result := VerifyResult{}
-	for _, segment := range manifest.Segments {
-		if err := ctx.Err(); err != nil {
-			return VerifyResult{}, err
-		}
-		info, err := store.Stat(ctx, segment.Key)
-		if err != nil {
-			return VerifyResult{}, fmt.Errorf("stat %s: %w", segment.Key, err)
-		}
-		if info.Size != segment.SizeBytes {
-			return VerifyResult{}, fmt.Errorf("object %s size %d, expected %d", segment.Key, info.Size, segment.SizeBytes)
-		}
-		data, err := store.Get(ctx, segment.Key)
-		if err != nil {
-			return VerifyResult{}, fmt.Errorf("get %s: %w", segment.Key, err)
-		}
-		validateAllBlocks := opts.SampleEvery <= 0
-		var validateRecord func(BlockRecord) error
-		if validateAllBlocks {
-			validateRecord = validateDecodedBlockRecord
-		}
-		records, err := decodeSegmentRecords(data, segment, validateRecord)
-		if err != nil {
-			return VerifyResult{}, fmt.Errorf("decode %s: %w", segment.Key, err)
-		}
-		if validateAllBlocks {
-			result.BlocksChecked += len(records)
-			result.SegmentsChecked++
-			continue
-		}
-		for _, record := range records {
-			if err := ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
+		return VerifyResult{}, err
+	}
+	if len(manifest.Segments) == 0 {
+		return VerifyResult{}, nil
+	}
+
+	workers := segmentConcurrency(opts.Concurrency)
+	if workers > len(manifest.Segments) {
+		workers = len(manifest.Segments)
+	}
+
+	errs := make([]error, len(manifest.Segments))
+	var blocksChecked int64
+	var segmentsChecked int64
+
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if err := workerCtx.Err(); err != nil {
+					errs[i] = err
+					continue
+				}
+				segment := manifest.Segments[i]
+				blocks, err := verifySegment(workerCtx, store, segment, manifest.FirstHeight, opts.SampleEvery)
+				if err != nil {
+					errs[i] = err
+					cancel()
+					continue
+				}
+				atomic.AddInt64(&blocksChecked, int64(blocks))
+				atomic.AddInt64(&segmentsChecked, 1)
+			}
+		}()
+	}
+
+	for i := range manifest.Segments {
+		select {
+		case <-workerCtx.Done():
+			close(jobs)
+			wg.Wait()
+			if err := firstSegmentError(errs, ctx.Err()); err != nil {
 				return VerifyResult{}, err
 			}
-			if (record.Height-manifest.FirstHeight)%opts.SampleEvery != 0 {
-				continue
-			}
-			if _, err := RecordToBlock(record); err != nil {
-				return VerifyResult{}, fmt.Errorf("block %d: %w", record.Height, err)
-			}
-			result.BlocksChecked++
+			// no errors recorded — context was cancelled externally
+			return VerifyResult{}, ctx.Err()
+		case jobs <- i:
 		}
-		result.SegmentsChecked++
 	}
-	return result, nil
+	close(jobs)
+	wg.Wait()
+	if err := firstSegmentError(errs, ctx.Err()); err != nil {
+		return VerifyResult{}, err
+	}
+	return VerifyResult{
+		SegmentsChecked: int(segmentsChecked),
+		BlocksChecked:   int(blocksChecked),
+	}, nil
+}
+
+// verifySegment performs the per-segment verification work and returns the
+// number of blocks counted toward BlocksChecked.
+func verifySegment(ctx context.Context, store ObjectStore, segment SegmentManifest, manifestFirstHeight int64, sampleEvery int64) (int, error) {
+	info, err := store.Stat(ctx, segment.Key)
+	if err != nil {
+		return 0, fmt.Errorf("stat %s: %w", segment.Key, err)
+	}
+	if info.Size != segment.SizeBytes {
+		return 0, fmt.Errorf("object %s size %d, expected %d", segment.Key, info.Size, segment.SizeBytes)
+	}
+	data, err := store.Get(ctx, segment.Key)
+	if err != nil {
+		return 0, fmt.Errorf("get %s: %w", segment.Key, err)
+	}
+	validateAllBlocks := sampleEvery <= 0
+	var validateRecord func(BlockRecord) error
+	if validateAllBlocks {
+		validateRecord = validateDecodedBlockRecord
+	}
+	records, err := decodeSegmentRecords(data, segment, validateRecord)
+	if err != nil {
+		return 0, fmt.Errorf("decode %s: %w", segment.Key, err)
+	}
+	if validateAllBlocks {
+		return len(records), nil
+	}
+	blocks := 0
+	for _, record := range records {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if (record.Height-manifestFirstHeight)%sampleEvery != 0 {
+			continue
+		}
+		if _, err := RecordToBlock(record); err != nil {
+			return 0, fmt.Errorf("block %d: %w", record.Height, err)
+		}
+		blocks++
+	}
+	return blocks, nil
 }

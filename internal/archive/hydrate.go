@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 )
 
 type InspectSummary struct {
@@ -60,6 +61,11 @@ type HydrateOptions struct {
 	StartHeight int64
 	EndHeight   int64
 	MaxBytes    int64
+	// Concurrency bounds the worker pool used to fetch and decode segments in
+	// parallel. Disk writes remain serialized in manifest order so the cache
+	// limit and atomic-rename ordering are preserved. Non-positive values
+	// select a sensible default (min(GOMAXPROCS, 8)).
+	Concurrency int
 }
 
 type HydrateResult struct {
@@ -95,45 +101,152 @@ func Hydrate(ctx context.Context, store ObjectStore, opts HydrateOptions) (Hydra
 	if start < manifest.FirstHeight || end > manifest.LastHeight || end < start {
 		return HydrateResult{}, fmt.Errorf("hydrate range %d-%d outside archive range %d-%d", start, end, manifest.FirstHeight, manifest.LastHeight)
 	}
+	if err := ctx.Err(); err != nil {
+		return HydrateResult{}, err
+	}
 	blockDir := filepath.Join(opts.CacheDir, "chains", manifest.ChainID, "blocks")
 	if err := os.MkdirAll(blockDir, 0o755); err != nil {
 		return HydrateResult{}, err
 	}
 	result := HydrateResult{CacheDir: opts.CacheDir}
-	for _, segment := range manifest.Segments {
-		if err := ctx.Err(); err != nil {
-			return HydrateResult{}, err
-		}
+
+	// Collect segments that overlap the requested range so workers and the
+	// writer agree on iteration order.
+	var relevant []int
+	for i, segment := range manifest.Segments {
 		if segment.LastHeight < start || segment.FirstHeight > end {
 			continue
 		}
-		data, err := store.Get(ctx, segment.Key)
-		if err != nil {
-			return HydrateResult{}, err
+		relevant = append(relevant, i)
+	}
+	if len(relevant) == 0 {
+		return result, nil
+	}
+
+	type segResult struct {
+		records []BlockRecord
+		err     error
+	}
+
+	workers := segmentConcurrency(opts.Concurrency)
+	if workers > len(relevant) {
+		workers = len(relevant)
+	}
+
+	// Per-slot single-buffered channels preserve manifest order on the writer
+	// side while allowing workers to race ahead within the concurrency bound.
+	results := make([]chan segResult, len(relevant))
+	for i := range results {
+		results[i] = make(chan segResult, 1)
+	}
+
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for slot := range jobs {
+				if err := workerCtx.Err(); err != nil {
+					results[slot] <- segResult{err: err}
+					continue
+				}
+				segment := manifest.Segments[relevant[slot]]
+				data, err := store.Get(workerCtx, segment.Key)
+				if err != nil {
+					results[slot] <- segResult{err: err}
+					cancel()
+					continue
+				}
+				records, err := DecodeSegment(data, segment)
+				if err != nil {
+					results[slot] <- segResult{err: err}
+					cancel()
+					continue
+				}
+				results[slot] <- segResult{records: records}
+			}
+		}()
+	}
+
+	// Submit jobs in a separate goroutine so the main goroutine can consume
+	// results in order without deadlocking on a full job channel.
+	go func() {
+		defer close(jobs)
+		for slot := range relevant {
+			select {
+			case <-workerCtx.Done():
+				return
+			case jobs <- slot:
+			}
 		}
-		records, err := DecodeSegment(data, segment)
-		if err != nil {
-			return HydrateResult{}, err
+	}()
+
+	// Consume results in manifest order and perform disk writes sequentially so
+	// enforceCacheLimit observes a deterministic on-disk state after every
+	// block.
+	var writeErr error
+	for slot := range relevant {
+		var res segResult
+		select {
+		case <-ctx.Done():
+			writeErr = ctx.Err()
+		case res = <-results[slot]:
 		}
-		for _, record := range records {
+		if writeErr != nil {
+			cancel()
+			break
+		}
+		if res.err != nil {
+			writeErr = res.err
+			cancel()
+			break
+		}
+		for _, record := range res.records {
 			if err := ctx.Err(); err != nil {
-				return HydrateResult{}, err
+				writeErr = err
+				break
 			}
 			if record.Height < start || record.Height > end {
 				continue
 			}
 			path := filepath.Join(blockDir, fmt.Sprintf("%012d.block", record.Height))
 			if err := atomicWriteFile(path, record.Bytes, 0o600); err != nil {
-				return HydrateResult{}, err
+				writeErr = err
+				break
 			}
 			result.BlocksWritten++
 			result.BytesWritten += int64(len(record.Bytes))
 			if opts.MaxBytes > 0 {
 				if err := enforceCacheLimit(blockDir, opts.MaxBytes); err != nil {
-					return HydrateResult{}, err
+					writeErr = err
+					break
 				}
 			}
 		}
+		if writeErr != nil {
+			cancel()
+			break
+		}
+	}
+
+	// Drain remaining worker results to release goroutines.
+	cancel()
+	wg.Wait()
+	// Drain any pending results that weren't consumed (after early break) so
+	// the buffered sends do not leak.
+	for _, ch := range results {
+		select {
+		case <-ch:
+		default:
+		}
+	}
+
+	if writeErr != nil {
+		return HydrateResult{}, writeErr
 	}
 	return result, nil
 }

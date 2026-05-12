@@ -3,6 +3,8 @@ package archive
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -142,6 +144,34 @@ func TestS3ObjectStoreOperationsAgainstCompatibleEndpoint(t *testing.T) {
 	}
 	if gotKeys := objectInfoKeys(infos); strings.Join(gotKeys, ",") != "segments/1.cba,segments/2.cba" {
 		t.Fatalf("list keys = %v", gotKeys)
+	}
+}
+
+func TestS3ObjectStorePutReturningETagMatchesLocalMD5(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	endpoint := newFakeS3Endpoint(t)
+	store, err := NewS3ObjectStore(context.Background(), "s3://archive-bucket/root/prefix?region=us-east-1&endpoint="+url.QueryEscape(endpoint.URL)+"&path_style=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("etag-verify-payload")
+	etag, err := store.PutIfAbsentReturningETag(context.Background(), "segments/etag.cba", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := md5.Sum(body)
+	want := hex.EncodeToString(sum[:])
+	if etag != want {
+		t.Fatalf("etag = %q, want %q", etag, want)
+	}
+	etag2, err := store.PutReturningETag(context.Background(), "segments/etag2.cba", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if etag2 != want {
+		t.Fatalf("put etag = %q, want %q", etag2, want)
 	}
 }
 
@@ -309,6 +339,8 @@ func newFakeS3Endpoint(t *testing.T) *httptest.Server {
 			mu.Lock()
 			objects[key] = data
 			mu.Unlock()
+			sum := md5.Sum(data)
+			w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:])+`"`)
 			w.WriteHeader(http.StatusOK)
 		case http.MethodGet:
 			mu.Lock()

@@ -36,6 +36,24 @@ type ImmutableObjectStore interface {
 	PutIfAbsent(ctx context.Context, key string, data []byte) error
 }
 
+// ETagImmutableObjectStore is an optional capability for object stores
+// (currently only S3) that can return an ETag from PutIfAbsent. Callers can
+// compare the returned ETag against a locally computed MD5 to verify the
+// upload without an extra round-trip Get. An empty etag, or one containing
+// a "-" (indicating a multipart upload whose ETag is not a plain MD5), means
+// the caller should fall back to re-downloading and re-hashing the object.
+type ETagImmutableObjectStore interface {
+	ImmutableObjectStore
+	PutIfAbsentReturningETag(ctx context.Context, key string, data []byte) (etag string, err error)
+}
+
+// ETagPutter is the analogous capability for unconditional Put. Used when an
+// object already-existed path needs revalidation but the store may also
+// expose ETag verification.
+type ETagPutter interface {
+	PutReturningETag(ctx context.Context, key string, data []byte) (etag string, err error)
+}
+
 func OpenObjectStore(url string) (ObjectStore, error) {
 	if err := ValidateObjectStoreURL(url); err != nil {
 		return nil, err

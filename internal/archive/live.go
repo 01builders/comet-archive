@@ -2,10 +2,12 @@ package archive
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -141,16 +143,12 @@ func ArchiveReady(ctx context.Context, reader BlockReader, store ObjectStore, op
 		if err != nil {
 			return LiveArchiveResult{}, err
 		}
-		manifest.Segments = appendSegment(manifest.Segments, segment)
-		rebuilt, err := NewManifest(opts.ChainID, manifest.Segments)
-		if err != nil {
+		// Segments are produced in ascending height order during live archiving,
+		// so append in place rather than re-sorting and re-validating the entire
+		// manifest after every segment (which would be O(N^2) over a long run).
+		if err := manifest.AppendSegmentInPlace(segment, time.Now().UTC()); err != nil {
 			return LiveArchiveResult{}, err
 		}
-		if !manifest.CreatedAt.IsZero() {
-			rebuilt.CreatedAt = manifest.CreatedAt
-		}
-		rebuilt.UpdatedAt = time.Now().UTC()
-		manifest = rebuilt
 		if err := SaveManifest(ctx, store, manifestKey, manifest); err != nil {
 			return LiveArchiveResult{}, err
 		}
@@ -225,6 +223,29 @@ func putImmutableSegment(ctx context.Context, store ObjectStore, segment Segment
 		}
 		return false, nil
 	}
+	// For stores that return an ETag from PUT (S3 single-part uploads), we
+	// can verify the upload by comparing the returned ETag to MD5(data) and
+	// avoid an extra round-trip Get + re-hash of the body we just sent. For
+	// multipart uploads the ETag is "<md5>-<parts>" and we fall back to the
+	// download-and-rehash path. Local stores don't expose ETags and keep the
+	// existing cheap local-roundtrip verification.
+	if etagImmutable, ok := store.(ETagImmutableObjectStore); ok {
+		localMD5 := localMD5Hex(data)
+		etag, putErr := etagImmutable.PutIfAbsentReturningETag(ctx, segment.Key, data)
+		if putErr != nil {
+			if errors.Is(putErr, ErrObjectAlreadyExists) {
+				if verifyErr := verifyStoredSegment(ctx, store, segment); verifyErr != nil {
+					return false, verifyErr
+				}
+				return false, nil
+			}
+			return false, putErr
+		}
+		if err := verifyUploadETag(ctx, store, segment, etag, localMD5); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	if immutableStore, ok := store.(ImmutableObjectStore); ok {
 		if err := immutableStore.PutIfAbsent(ctx, segment.Key, data); err != nil {
 			if errors.Is(err, ErrObjectAlreadyExists) {
@@ -240,6 +261,17 @@ func putImmutableSegment(ctx context.Context, store ObjectStore, segment Segment
 		}
 		return true, nil
 	}
+	if etagPutter, ok := store.(ETagPutter); ok {
+		localMD5 := localMD5Hex(data)
+		etag, putErr := etagPutter.PutReturningETag(ctx, segment.Key, data)
+		if putErr != nil {
+			return false, putErr
+		}
+		if err := verifyUploadETag(ctx, store, segment, etag, localMD5); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	if err := store.Put(ctx, segment.Key, data); err != nil {
 		return false, err
 	}
@@ -249,6 +281,27 @@ func putImmutableSegment(ctx context.Context, store ObjectStore, segment Segment
 	return true, nil
 }
 
+// verifyUploadETag short-circuits remote verification when the store
+// returned a usable ETag (the MD5 of the uploaded body, returned by S3 for
+// non-multipart PUTs). If the ETag is empty or indicates a multipart upload
+// (contains "-"), it falls back to the re-download path. A non-empty
+// non-multipart ETag that does not match the local MD5 is reported as a
+// verification failure without any further round-trip.
+func verifyUploadETag(ctx context.Context, store ObjectStore, segment SegmentManifest, etag, localMD5 string) error {
+	etag = strings.ToLower(strings.Trim(etag, "\""))
+	if etag == "" || strings.Contains(etag, "-") {
+		return verifyStoredSegment(ctx, store, segment)
+	}
+	if etag != localMD5 {
+		return fmt.Errorf("object %s differs from expected segment", segment.Key)
+	}
+	return nil
+}
+
+// verifyStoredSegment downloads the stored object and recomputes its hash
+// to confirm the upload is intact. It is used as the fallback path when the
+// underlying store does not expose an ETag (e.g. local filesystem) or when
+// the ETag indicates a multipart upload.
 func verifyStoredSegment(ctx context.Context, store ObjectStore, segment SegmentManifest) error {
 	current, err := store.Get(ctx, segment.Key)
 	if err != nil {
@@ -259,4 +312,9 @@ func verifyStoredSegment(ctx context.Context, store ObjectStore, segment Segment
 		return fmt.Errorf("object %s differs from expected segment", segment.Key)
 	}
 	return nil
+}
+
+func localMD5Hex(data []byte) string {
+	sum := md5.Sum(data)
+	return hex.EncodeToString(sum[:])
 }

@@ -48,7 +48,12 @@ type IngestResult struct {
 const maxFetchedValidatorSets = 256
 
 type HotIngestor struct {
-	mu             sync.Mutex
+	// mu serializes ingestion writes (Submit, persistPending) while allowing
+	// concurrent readers (LoadBlock, AdvertisedRange, NextHeight, BlockReader)
+	// so the reactor's p2p Receive goroutine isn't blocked by SaveBlock/leveldb
+	// writes. Mutations to i.pending and i.fetchedSets only happen under the
+	// write lock; reads under the read lock observe a consistent snapshot.
+	mu             sync.RWMutex
 	store          *store.BlockStore
 	opts           IngestOptions
 	pending        *types.Block
@@ -107,8 +112,8 @@ func NewHotIngestor(blockStore *store.BlockStore, opts IngestOptions) (*HotInges
 }
 
 func (i *HotIngestor) NextHeight() int64 {
-	i.mu.Lock()
-	defer i.mu.Unlock()
+	i.mu.RLock()
+	defer i.mu.RUnlock()
 	return i.nextHeightLocked()
 }
 
@@ -123,8 +128,8 @@ func (i *HotIngestor) nextHeightLocked() int64 {
 }
 
 func (i *HotIngestor) AdvertisedRange() PeerRange {
-	i.mu.Lock()
-	defer i.mu.Unlock()
+	i.mu.RLock()
+	defer i.mu.RUnlock()
 	if i.store.Height() == 0 {
 		return PeerRange{}
 	}
@@ -132,11 +137,13 @@ func (i *HotIngestor) AdvertisedRange() PeerRange {
 }
 
 func (i *HotIngestor) LoadBlock(height int64) *types.Block {
-	i.mu.Lock()
-	defer i.mu.Unlock()
+	i.mu.RLock()
+	defer i.mu.RUnlock()
 	return i.store.LoadBlock(height)
 }
 
+// WithHotStore retains an exclusive lock because callers may perform writes
+// (compaction/pruning) on the underlying block store.
 func (i *HotIngestor) WithHotStore(fn func(*store.BlockStore) error) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -148,20 +155,20 @@ func (i *HotIngestor) BlockReader() *HotBlockReader {
 }
 
 func (r *HotBlockReader) Base() int64 {
-	r.ingestor.mu.Lock()
-	defer r.ingestor.mu.Unlock()
+	r.ingestor.mu.RLock()
+	defer r.ingestor.mu.RUnlock()
 	return r.ingestor.store.Base()
 }
 
 func (r *HotBlockReader) Height() int64 {
-	r.ingestor.mu.Lock()
-	defer r.ingestor.mu.Unlock()
+	r.ingestor.mu.RLock()
+	defer r.ingestor.mu.RUnlock()
 	return r.ingestor.store.Height()
 }
 
 func (r *HotBlockReader) LoadBlock(height int64) *types.Block {
-	r.ingestor.mu.Lock()
-	defer r.ingestor.mu.Unlock()
+	r.ingestor.mu.RLock()
+	defer r.ingestor.mu.RUnlock()
 	return r.ingestor.store.LoadBlock(height)
 }
 
@@ -193,8 +200,8 @@ func (i *HotIngestor) Submit(block *types.Block) (IngestResult, error) {
 }
 
 func (i *HotIngestor) PendingHeight() int64 {
-	i.mu.Lock()
-	defer i.mu.Unlock()
+	i.mu.RLock()
+	defer i.mu.RUnlock()
 	if i.pending == nil {
 		return 0
 	}

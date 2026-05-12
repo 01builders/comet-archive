@@ -525,7 +525,7 @@ func TestReactorCountsColdBlockResponsesAndErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := &scriptedColdBlockSource{block: makeIngestBlock(t, 1)}
+	source := &scriptedColdBlockSource{advertised: PeerRange{Base: 1, Height: 2}, block: makeIngestBlock(t, 1)}
 	reactor, err := NewReactor(ingestor, nil, ReactorOptions{
 		ColdBlockSource: source,
 		RequestTimeout:  time.Second,
@@ -606,19 +606,32 @@ func TestReactorRejectsColdRequestOutsideAdvertisedRange(t *testing.T) {
 			advertised: PeerRange{Base: 10, Height: 20},
 			block:      makeIngestBlock(t, 10),
 		},
-		RequestLimit: 1,
+		RequestLimit:   1,
+		RequestTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if startErr := reactor.Start(); startErr != nil {
+		t.Fatal(startErr)
+	}
+	t.Cleanup(func() {
+		if stopErr := reactor.Stop(); stopErr != nil {
+			t.Fatal(stopErr)
+		}
+	})
 	peer := newFakePeer("peer")
 	reactor.Receive(p2p.Envelope{
 		Src:       peer,
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.BlockRequest{Height: 9},
 	})
-	if queued := reactor.QueuedColdBlockRequests(); queued != 0 {
-		t.Fatalf("queued cold requests = %d, want 0", queued)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if reactor.NoBlockResponses() == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if noBlocks := collectNoBlockResponses(peer.sent); len(noBlocks) != 1 || noBlocks[0].Height != 9 {
 		t.Fatalf("unexpected no-block responses: %+v", noBlocks)
@@ -637,18 +650,31 @@ func TestReactorCountsColdAdvertisedRangeErrors(t *testing.T) {
 	reactor, err := NewReactor(ingestor, nil, ReactorOptions{
 		ColdBlockSource: &scriptedColdBlockSource{err: errors.New("manifest unavailable")},
 		RequestLimit:    1,
+		RequestTimeout:  time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if startErr := reactor.Start(); startErr != nil {
+		t.Fatal(startErr)
+	}
+	t.Cleanup(func() {
+		if stopErr := reactor.Stop(); stopErr != nil {
+			t.Fatal(stopErr)
+		}
+	})
 	peer := newFakePeer("peer")
 	reactor.Receive(p2p.Envelope{
 		Src:       peer,
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.BlockRequest{Height: 1},
 	})
-	if queued := reactor.QueuedColdBlockRequests(); queued != 0 {
-		t.Fatalf("queued cold requests = %d, want 0", queued)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if reactor.ColdBlockErrors() == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if coldErrors := reactor.ColdBlockErrors(); coldErrors != 1 {
 		t.Fatalf("cold errors = %d, want 1", coldErrors)

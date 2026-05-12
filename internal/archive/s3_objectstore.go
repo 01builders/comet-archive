@@ -167,31 +167,57 @@ func (s *S3ObjectStore) Get(ctx context.Context, key string) ([]byte, error) {
 }
 
 func (s *S3ObjectStore) Put(ctx context.Context, key string, data []byte) error {
+	_, err := s.PutReturningETag(ctx, key, data)
+	return err
+}
+
+func (s *S3ObjectStore) PutReturningETag(ctx context.Context, key string, data []byte) (string, error) {
 	if err := ValidateObjectKey(key); err != nil {
-		return err
+		return "", err
 	}
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(s.fullKey(key)),
 		Body:   bytes.NewReader(data),
 	})
-	return err
+	if err != nil {
+		return "", err
+	}
+	return normalizeETag(aws.ToString(out.ETag)), nil
 }
 
 func (s *S3ObjectStore) PutIfAbsent(ctx context.Context, key string, data []byte) error {
+	_, err := s.PutIfAbsentReturningETag(ctx, key, data)
+	return err
+}
+
+func (s *S3ObjectStore) PutIfAbsentReturningETag(ctx context.Context, key string, data []byte) (string, error) {
 	if err := ValidateObjectKey(key); err != nil {
-		return err
+		return "", err
 	}
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(s.fullKey(key)),
 		Body:        bytes.NewReader(data),
 		IfNoneMatch: aws.String("*"),
 	})
 	if isS3AlreadyExists(err) {
-		return ErrObjectAlreadyExists
+		return "", ErrObjectAlreadyExists
 	}
-	return err
+	if err != nil {
+		return "", err
+	}
+	return normalizeETag(aws.ToString(out.ETag)), nil
+}
+
+// normalizeETag strips the surrounding quotes that S3 includes in ETag
+// header values and lowercases the hex digest. For non-multipart PUTs the
+// returned value is the MD5 of the uploaded body. For multipart uploads the
+// ETag is of the form "<md5>-<parts>" and callers must fall back to a
+// re-download comparison.
+func normalizeETag(etag string) string {
+	etag = strings.Trim(etag, "\"")
+	return strings.ToLower(etag)
 }
 
 func (s *S3ObjectStore) Exists(ctx context.Context, key string) (bool, error) {

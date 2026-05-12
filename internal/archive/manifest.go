@@ -63,6 +63,48 @@ func NewManifest(chainID string, segments []SegmentManifest) (Manifest, error) {
 	return m, m.Validate()
 }
 
+// AppendSegmentInPlace appends a new segment to the manifest without
+// re-sorting or re-validating the existing segment list. It performs only
+// the cheap, O(1) checks required to keep the manifest consistent: it
+// validates the new segment in isolation, checks contiguity with the
+// previous tail (FirstHeight == prior LastHeight + 1), and updates
+// LastHeight / UpdatedAt while preserving FirstHeight / CreatedAt. The
+// manifest is assumed to already be valid; callers building a manifest
+// incrementally (e.g. live archiving) should use this helper instead of
+// rebuilding the manifest from scratch after each segment upload.
+func (m *Manifest) AppendSegmentInPlace(segment SegmentManifest, now time.Time) error {
+	if m == nil {
+		return errors.New("manifest is nil")
+	}
+	if m.Version == 0 {
+		m.Version = ManifestVersion
+	}
+	if err := segment.Validate(); err != nil {
+		return fmt.Errorf("segment: %w", err)
+	}
+	if len(m.Segments) == 0 {
+		m.Segments = append(m.Segments, segment)
+		m.FirstHeight = segment.FirstHeight
+		m.LastHeight = segment.LastHeight
+		if m.CreatedAt.IsZero() {
+			m.CreatedAt = now
+		}
+		m.UpdatedAt = now
+		return nil
+	}
+	prev := m.Segments[len(m.Segments)-1]
+	if segment.FirstHeight != prev.LastHeight+1 {
+		return fmt.Errorf("segment starts at %d, expected %d", segment.FirstHeight, prev.LastHeight+1)
+	}
+	if segment.Key == prev.Key {
+		return fmt.Errorf("duplicate segment key %q", segment.Key)
+	}
+	m.Segments = append(m.Segments, segment)
+	m.LastHeight = segment.LastHeight
+	m.UpdatedAt = now
+	return nil
+}
+
 func LoadManifest(ctx context.Context, store ObjectStore, key string) (Manifest, error) {
 	if err := ValidateObjectKey(key); err != nil {
 		return Manifest{}, fmt.Errorf("manifest key: %w", err)
