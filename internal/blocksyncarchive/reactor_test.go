@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,10 +32,10 @@ func TestReactorRequestsIngestsAndServesBlocks(t *testing.T) {
 	}
 	peer := newFakePeer("peer")
 	reactor.AddPeer(peer)
-	if responses := collectStatusResponses(peer.sent); len(responses) != 1 {
+	if responses := collectStatusResponses(peer.sentEnvelopes()); len(responses) != 1 {
 		t.Fatalf("AddPeer sent %d status responses, want 1", len(responses))
 	}
-	if requests := collectStatusRequests(peer.sent); len(requests) != 1 {
+	if requests := collectStatusRequests(peer.sentEnvelopes()); len(requests) != 1 {
 		t.Fatalf("AddPeer sent %d status requests, want 1", len(requests))
 	}
 	reactor.Receive(p2p.Envelope{
@@ -42,7 +43,7 @@ func TestReactorRequestsIngestsAndServesBlocks(t *testing.T) {
 		ChannelID: 0x40,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 2},
 	})
-	requests := collectRequests(peer.sent)
+	requests := collectRequests(peer.sentEnvelopes())
 	if len(requests) != 2 || requests[0].Height != 1 || requests[1].Height != 2 {
 		t.Fatalf("unexpected block requests: %+v", requests)
 	}
@@ -68,7 +69,7 @@ func TestReactorRequestsIngestsAndServesBlocks(t *testing.T) {
 		ChannelID: 0x40,
 		Message:   &bcproto.BlockRequest{Height: 1},
 	})
-	if responses := collectBlockResponses(requester.sent); len(responses) != 1 {
+	if responses := collectBlockResponses(requester.sentEnvelopes()); len(responses) != 1 {
 		t.Fatalf("got %d block responses, want 1", len(responses))
 	}
 	if responses := reactor.HotBlockResponses(); responses != 1 {
@@ -92,7 +93,7 @@ func TestReactorReturnsNoBlockForColdOrMissingHeights(t *testing.T) {
 		ChannelID: 0x40,
 		Message:   &bcproto.BlockRequest{Height: 99},
 	})
-	if noBlocks := collectNoBlockResponses(peer.sent); len(noBlocks) != 1 || noBlocks[0].Height != 99 {
+	if noBlocks := collectNoBlockResponses(peer.sentEnvelopes()); len(noBlocks) != 1 || noBlocks[0].Height != 99 {
 		t.Fatalf("unexpected no-block responses: %+v", noBlocks)
 	}
 	if responses := reactor.NoBlockResponses(); responses != 1 {
@@ -201,7 +202,7 @@ func TestReactorIgnoresUnsolicitedBlockResponses(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 1},
 	})
-	peerA.sent = nil
+	peerA.resetSent()
 	reactor.Receive(p2p.Envelope{
 		Src:       peerB,
 		ChannelID: cmtblocksync.BlocksyncChannel,
@@ -240,7 +241,7 @@ func TestReactorBuffersOutOfOrderBlockResponses(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 3},
 	})
-	requests := collectRequests(peer.sent)
+	requests := collectRequests(peer.sentEnvelopes())
 	if len(requests) != 3 {
 		t.Fatalf("block requests = %d, want 3: %+v", len(requests), requests)
 	}
@@ -295,11 +296,11 @@ func TestReactorRetriesImmediatelyAfterInvalidBlockResponse(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 1},
 	})
-	initial := collectRequests(peerA.sent)
+	initial := collectRequests(peerA.sentEnvelopes())
 	if len(initial) == 0 || initial[0].Height != 1 {
 		t.Fatalf("unexpected initial request to peer-a: %+v", initial)
 	}
-	peerB.sent = nil
+	peerB.resetSent()
 	badBlock := makeIngestBlock(t, 1)
 	badBlock.ChainID = "wrong-chain"
 	pb, err := badBlock.ToProto()
@@ -311,7 +312,7 @@ func TestReactorRetriesImmediatelyAfterInvalidBlockResponse(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.BlockResponse{Block: pb},
 	})
-	retry := collectRequests(peerB.sent)
+	retry := collectRequests(peerB.sentEnvelopes())
 	if len(retry) != 1 || retry[0].Height != 1 {
 		t.Fatalf("expected immediate retry to peer-b after invalid response, got %+v", retry)
 	}
@@ -341,17 +342,17 @@ func TestReactorRetriesImmediatelyAfterMalformedBlockResponse(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 1},
 	})
-	initial := collectRequests(peerA.sent)
+	initial := collectRequests(peerA.sentEnvelopes())
 	if len(initial) == 0 || initial[0].Height != 1 {
 		t.Fatalf("unexpected initial request to peer-a: %+v", initial)
 	}
-	peerB.sent = nil
+	peerB.resetSent()
 	reactor.Receive(p2p.Envelope{
 		Src:       peerA,
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.BlockResponse{},
 	})
-	retry := collectRequests(peerB.sent)
+	retry := collectRequests(peerB.sentEnvelopes())
 	if len(retry) != 1 || retry[0].Height != 1 {
 		t.Fatalf("expected immediate retry to peer-b after malformed response, got %+v", retry)
 	}
@@ -381,7 +382,7 @@ func TestReactorRetriesImmediatelyAfterInvalidBufferedBlockResponse(t *testing.T
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 2},
 	})
-	requests := collectRequests(peerA.sent)
+	requests := collectRequests(peerA.sentEnvelopes())
 	if len(requests) != 2 {
 		t.Fatalf("block requests = %d, want 2: %+v", len(requests), requests)
 	}
@@ -401,7 +402,7 @@ func TestReactorRetriesImmediatelyAfterInvalidBufferedBlockResponse(t *testing.T
 		t.Fatalf("buffered responses = %d, want 1", buffered)
 	}
 
-	peerB.sent = nil
+	peerB.resetSent()
 	goodFirst := makeIngestBlock(t, 1)
 	goodPB, err := goodFirst.ToProto()
 	if err != nil {
@@ -412,7 +413,7 @@ func TestReactorRetriesImmediatelyAfterInvalidBufferedBlockResponse(t *testing.T
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.BlockResponse{Block: goodPB},
 	})
-	retry := collectRequests(peerB.sent)
+	retry := collectRequests(peerB.sentEnvelopes())
 	if len(retry) != 1 || retry[0].Height != 2 {
 		t.Fatalf("expected immediate retry of invalid buffered height to peer-b, got %+v", retry)
 	}
@@ -437,7 +438,7 @@ func TestReactorDropsBufferedResponsesWhenPeerIsRemoved(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 2},
 	})
-	requests := collectRequests(peerA.sent)
+	requests := collectRequests(peerA.sentEnvelopes())
 	if len(requests) != 2 {
 		t.Fatalf("block requests = %d, want 2: %+v", len(requests), requests)
 	}
@@ -456,13 +457,13 @@ func TestReactorDropsBufferedResponsesWhenPeerIsRemoved(t *testing.T) {
 	}
 	reactor.RemovePeer(peerA, nil)
 
-	peerB.sent = nil
+	peerB.resetSent()
 	reactor.Receive(p2p.Envelope{
 		Src:       peerB,
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 2},
 	})
-	failover := collectRequests(peerB.sent)
+	failover := collectRequests(peerB.sentEnvelopes())
 	if len(failover) != 2 || failover[0].Height != 1 || failover[1].Height != 2 {
 		t.Fatalf("unexpected failover requests after dropping buffer: %+v", failover)
 	}
@@ -487,7 +488,7 @@ func TestReactorDropsBufferedResponsesWhenPeerRangeContracts(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 2},
 	})
-	requests := collectRequests(peerA.sent)
+	requests := collectRequests(peerA.sentEnvelopes())
 	if len(requests) != 2 {
 		t.Fatalf("block requests = %d, want 2: %+v", len(requests), requests)
 	}
@@ -507,13 +508,13 @@ func TestReactorDropsBufferedResponsesWhenPeerRangeContracts(t *testing.T) {
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 1},
 	})
 
-	peerB.sent = nil
+	peerB.resetSent()
 	reactor.Receive(p2p.Envelope{
 		Src:       peerB,
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 2},
 	})
-	failover := collectRequests(peerB.sent)
+	failover := collectRequests(peerB.sentEnvelopes())
 	if len(failover) != 1 || failover[0].Height != 2 {
 		t.Fatalf("unexpected failover request after range contraction: %+v", failover)
 	}
@@ -535,18 +536,18 @@ func TestReactorCountsColdBlockResponsesAndErrors(t *testing.T) {
 	}
 	peer := newFakePeer("peer")
 	reactor.respondToColdBlockRequest(peer, 1)
-	if responses := collectBlockResponses(peer.sent); len(responses) != 1 {
+	if responses := collectBlockResponses(peer.sentEnvelopes()); len(responses) != 1 {
 		t.Fatalf("cold block responses = %d, want 1", len(responses))
 	}
 	if responses := reactor.ColdBlockResponses(); responses != 1 {
 		t.Fatalf("cold response metric = %d, want 1", responses)
 	}
 
-	peer.sent = nil
+	peer.resetSent()
 	source.block = nil
 	source.err = errors.New("cold store unavailable")
 	reactor.respondToColdBlockRequest(peer, 2)
-	if noBlocks := collectNoBlockResponses(peer.sent); len(noBlocks) != 1 || noBlocks[0].Height != 2 {
+	if noBlocks := collectNoBlockResponses(peer.sentEnvelopes()); len(noBlocks) != 1 || noBlocks[0].Height != 2 {
 		t.Fatalf("unexpected no-block responses: %+v", noBlocks)
 	}
 	if coldErrors := reactor.ColdBlockErrors(); coldErrors != 1 {
@@ -587,7 +588,7 @@ func TestReactorBoundsQueuedColdBlockRequests(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.BlockRequest{Height: 2},
 	})
-	if noBlocks := collectNoBlockResponses(peer.sent); len(noBlocks) != 0 {
+	if noBlocks := collectNoBlockResponses(peer.sentEnvelopes()); len(noBlocks) != 0 {
 		t.Fatalf("unexpected no-block responses for queued cold request: %+v", noBlocks)
 	}
 	if queueFull := reactor.ColdQueueFull(); queueFull != 1 {
@@ -633,7 +634,7 @@ func TestReactorRejectsColdRequestOutsideAdvertisedRange(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if noBlocks := collectNoBlockResponses(peer.sent); len(noBlocks) != 1 || noBlocks[0].Height != 9 {
+	if noBlocks := collectNoBlockResponses(peer.sentEnvelopes()); len(noBlocks) != 1 || noBlocks[0].Height != 9 {
 		t.Fatalf("unexpected no-block responses: %+v", noBlocks)
 	}
 	if responses := reactor.NoBlockResponses(); responses != 1 {
@@ -679,7 +680,7 @@ func TestReactorCountsColdAdvertisedRangeErrors(t *testing.T) {
 	if coldErrors := reactor.ColdBlockErrors(); coldErrors != 1 {
 		t.Fatalf("cold errors = %d, want 1", coldErrors)
 	}
-	if noBlocks := collectNoBlockResponses(peer.sent); len(noBlocks) != 1 || noBlocks[0].Height != 1 {
+	if noBlocks := collectNoBlockResponses(peer.sentEnvelopes()); len(noBlocks) != 1 || noBlocks[0].Height != 1 {
 		t.Fatalf("unexpected no-block responses: %+v", noBlocks)
 	}
 }
@@ -699,7 +700,7 @@ func TestReactorStatusExchangeBroadcastsUpdatedColdRange(t *testing.T) {
 	reactor.AddPeer(peer)
 	source.advertised = PeerRange{Base: 1, Height: 10}
 	reactor.exchangeStatuses()
-	statuses := collectStatusResponses(peer.sent)
+	statuses := collectStatusResponses(peer.sentEnvelopes())
 	if len(statuses) < 2 {
 		t.Fatalf("status responses = %d, want at least 2", len(statuses))
 	}
@@ -707,8 +708,43 @@ func TestReactorStatusExchangeBroadcastsUpdatedColdRange(t *testing.T) {
 	if last.Base != 1 || last.Height != 10 {
 		t.Fatalf("last status range = %d-%d, want 1-10", last.Base, last.Height)
 	}
-	if requests := collectStatusRequests(peer.sent); len(requests) < 2 {
+	if requests := collectStatusRequests(peer.sentEnvelopes()); len(requests) < 2 {
 		t.Fatalf("status requests = %d, want at least 2", len(requests))
+	}
+}
+
+func TestReactorStartSeedsColdRangeWhenStatusPollingDisabled(t *testing.T) {
+	blockStore := newTestBlockStore(t)
+	ingestor, err := NewHotIngestor(blockStore, IngestOptions{ChainID: ingestTestChainID, StartHeight: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &scriptedColdBlockSource{advertised: PeerRange{Base: 1, Height: 7}}
+	reactor, err := NewReactor(ingestor, nil, ReactorOptions{
+		ColdBlockSource:       source,
+		RequestTimeout:        time.Second,
+		StatusRequestInterval: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if startErr := reactor.Start(); startErr != nil {
+		t.Fatal(startErr)
+	}
+	t.Cleanup(func() {
+		if stopErr := reactor.Stop(); stopErr != nil {
+			t.Fatal(stopErr)
+		}
+	})
+	peer := newFakePeer("peer")
+	reactor.AddPeer(peer)
+	statuses := collectStatusResponses(peer.sentEnvelopes())
+	if len(statuses) == 0 {
+		t.Fatal("expected status response")
+	}
+	last := statuses[len(statuses)-1]
+	if last.Base != 1 || last.Height != 7 {
+		t.Fatalf("status range = %d-%d, want 1-7", last.Base, last.Height)
 	}
 }
 
@@ -845,17 +881,17 @@ func TestReactorRetriesNoBlockHeightWithAnotherPeer(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 3},
 	})
-	initial := collectRequests(peerA.sent)
+	initial := collectRequests(peerA.sentEnvelopes())
 	if len(initial) == 0 || initial[0].Height != 1 {
 		t.Fatalf("unexpected initial request to peer-a: %+v", initial)
 	}
-	peerB.sent = nil
+	peerB.resetSent()
 	reactor.Receive(p2p.Envelope{
 		Src:       peerA,
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.NoBlockResponse{Height: 1},
 	})
-	failover := collectRequests(peerB.sent)
+	failover := collectRequests(peerB.sentEnvelopes())
 	if len(failover) != 1 || failover[0].Height != 1 {
 		t.Fatalf("expected height 1 failover request to peer-b, got %+v", failover)
 	}
@@ -885,11 +921,11 @@ func TestReactorIgnoresNoBlockFromWrongPeer(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 3},
 	})
-	initial := collectRequests(peerA.sent)
+	initial := collectRequests(peerA.sentEnvelopes())
 	if len(initial) == 0 || initial[0].Height != 1 {
 		t.Fatalf("unexpected initial request to peer-a: %+v", initial)
 	}
-	peerB.sent = nil
+	peerB.resetSent()
 	reactor.Receive(p2p.Envelope{
 		Src:       peerB,
 		ChannelID: cmtblocksync.BlocksyncChannel,
@@ -898,7 +934,7 @@ func TestReactorIgnoresNoBlockFromWrongPeer(t *testing.T) {
 	if peerID, ok := reactor.planner.InflightPeer(1); !ok || peerID != "peer-a" {
 		t.Fatalf("inflight peer after wrong no-block = %q/%v, want peer-a/true", peerID, ok)
 	}
-	if failover := collectRequests(peerB.sent); len(failover) != 0 {
+	if failover := collectRequests(peerB.sentEnvelopes()); len(failover) != 0 {
 		t.Fatalf("wrong-peer no-block caused retry: %+v", failover)
 	}
 }
@@ -930,21 +966,21 @@ func TestReactorRetriesTimedOutRequestWithAnotherPeer(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 3},
 	})
-	initial := collectRequests(peerA.sent)
+	initial := collectRequests(peerA.sentEnvelopes())
 	if len(initial) == 0 || initial[0].Height != 1 {
 		t.Fatalf("unexpected initial request to peer-a: %+v", initial)
 	}
 	if inflight := reactor.InflightRequests(); inflight != 1 {
 		t.Fatalf("inflight requests = %d, want 1", inflight)
 	}
-	peerA.sent = nil
-	peerB.sent = nil
+	peerA.resetSent()
+	peerB.resetSent()
 	time.Sleep(2 * time.Millisecond)
 	reactor.expireRequestsAndPlan()
 	if timeouts := reactor.RequestTimeouts(); timeouts != 1 {
 		t.Fatalf("request timeouts = %d, want 1", timeouts)
 	}
-	retry := collectRequests(peerB.sent)
+	retry := collectRequests(peerB.sentEnvelopes())
 	if len(retry) != 1 || retry[0].Height != 1 {
 		t.Fatalf("expected timed-out height 1 retry to peer-b, got %+v", retry)
 	}
@@ -959,7 +995,7 @@ func TestArchiveBlockRequestIsCompatibleWithStockBlocksyncReactor(t *testing.T) 
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.BlockRequest{Height: 1},
 	})
-	responses := collectBlockResponses(requester.sent)
+	responses := collectBlockResponses(requester.sentEnvelopes())
 	if len(responses) != 1 {
 		t.Fatalf("got %d stock responses, want 1", len(responses))
 	}
@@ -990,18 +1026,18 @@ func TestArchiveReactorIngestsStockBlocksyncResponses(t *testing.T) {
 		ChannelID: cmtblocksync.BlocksyncChannel,
 		Message:   &bcproto.StatusResponse{Base: 1, Height: 2},
 	})
-	requests := collectRequests(peer.sent)
+	requests := collectRequests(peer.sentEnvelopes())
 	if len(requests) != 2 {
 		t.Fatalf("archive reactor requested %d blocks, want 2", len(requests))
 	}
 	for _, request := range requests {
-		peer.sent = nil
+		peer.resetSent()
 		stock.Receive(p2p.Envelope{
 			Src:       peer,
 			ChannelID: cmtblocksync.BlocksyncChannel,
 			Message:   request,
 		})
-		responses := collectBlockResponses(peer.sent)
+		responses := collectBlockResponses(peer.sentEnvelopes())
 		if len(responses) != 1 {
 			t.Fatalf("stock reactor returned %d responses for height %d", len(responses), request.Height)
 		}
@@ -1165,6 +1201,7 @@ func (s *multiBlockingColdBlockSource) LoadBlock(ctx context.Context, _ int64) (
 type fakePeer struct {
 	id   p2p.ID
 	quit chan struct{}
+	mu   sync.Mutex
 	sent []p2p.Envelope
 }
 
@@ -1194,9 +1231,24 @@ func (*fakePeer) Status() cmtconn.ConnectionStatus  { return cmtconn.ConnectionS
 func (*fakePeer) SocketAddr() *p2p.NetAddress       { return nil }
 func (p *fakePeer) Send(envelope p2p.Envelope) bool { return p.TrySend(envelope) }
 func (p *fakePeer) TrySend(envelope p2p.Envelope) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.sent = append(p.sent, envelope)
 	return true
 }
+
+func (p *fakePeer) sentEnvelopes() []p2p.Envelope {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]p2p.Envelope(nil), p.sent...)
+}
+
+func (p *fakePeer) resetSent() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sent = nil
+}
+
 func (*fakePeer) Set(string, any)        {}
 func (*fakePeer) Get(string) any         { return nil }
 func (*fakePeer) SetRemovalFailed()      {}

@@ -328,6 +328,38 @@ func TestArchiveReadyDoesNotPublishUnverifiedUpload(t *testing.T) {
 	}
 }
 
+func TestArchiveReadyFallsBackWhenETagIsOpaque(t *testing.T) {
+	ctx := context.Background()
+	dbDir := filepath.Join(t.TempDir(), "db")
+	createBlockStoreFixture(t, dbDir, 1)
+	reader, err := OpenCometBlockStore(dbDir, "goleveldb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	localStore, err := NewLocalObjectStore(filepath.Join(t.TempDir(), "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := opaqueETagSegmentStore{ObjectStore: localStore}
+	result, err := ArchiveReady(ctx, reader, store, LiveArchiveOptions{
+		ChainID:       testChainID,
+		Prefix:        "archive",
+		ReadyHeight:   1,
+		SegmentBlocks: 1,
+		Compression:   CompressionGzip,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Uploaded != 1 {
+		t.Fatalf("uploaded %d segments, want 1", result.Uploaded)
+	}
+	if _, err := Verify(ctx, localStore, VerifyOptions{ManifestKey: result.ManifestKey}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type corruptingSegmentStore struct {
 	ObjectStore
 }
@@ -350,4 +382,38 @@ func corruptSegmentObject(key string, data []byte) []byte {
 		corrupted[len(corrupted)-1] ^= 0xff
 	}
 	return corrupted
+}
+
+type opaqueETagSegmentStore struct {
+	ObjectStore
+}
+
+func (s opaqueETagSegmentStore) PutReturningETag(ctx context.Context, key string, data []byte) (string, error) {
+	if err := s.ObjectStore.Put(ctx, key, data); err != nil {
+		return "", err
+	}
+	return "opaque-etag", nil
+}
+
+func (s opaqueETagSegmentStore) PutIfAbsent(ctx context.Context, key string, data []byte) error {
+	_, err := s.PutIfAbsentReturningETag(ctx, key, data)
+	return err
+}
+
+func (s opaqueETagSegmentStore) PutIfAbsentReturningETag(ctx context.Context, key string, data []byte) (string, error) {
+	immutableStore, ok := s.ObjectStore.(ImmutableObjectStore)
+	if !ok {
+		exists, err := s.ObjectStore.Exists(ctx, key)
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return "", ErrObjectAlreadyExists
+		}
+		return s.PutReturningETag(ctx, key, data)
+	}
+	if err := immutableStore.PutIfAbsent(ctx, key, data); err != nil {
+		return "", err
+	}
+	return "opaque-etag", nil
 }

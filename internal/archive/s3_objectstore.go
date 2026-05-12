@@ -211,10 +211,9 @@ func (s *S3ObjectStore) PutIfAbsentReturningETag(ctx context.Context, key string
 }
 
 // normalizeETag strips the surrounding quotes that S3 includes in ETag
-// header values and lowercases the hex digest. For non-multipart PUTs the
-// returned value is the MD5 of the uploaded body. For multipart uploads the
-// ETag is of the form "<md5>-<parts>" and callers must fall back to a
-// re-download comparison.
+// header values and lowercases the value. Some S3-compatible responses use
+// non-MD5 ETags, so callers must treat non-matching ETags as opaque and fall
+// back to a re-download comparison.
 func normalizeETag(etag string) string {
 	etag = strings.Trim(etag, "\"")
 	return strings.ToLower(etag)

@@ -223,12 +223,10 @@ func putImmutableSegment(ctx context.Context, store ObjectStore, segment Segment
 		}
 		return false, nil
 	}
-	// For stores that return an ETag from PUT (S3 single-part uploads), we
-	// can verify the upload by comparing the returned ETag to MD5(data) and
-	// avoid an extra round-trip Get + re-hash of the body we just sent. For
-	// multipart uploads the ETag is "<md5>-<parts>" and we fall back to the
-	// download-and-rehash path. Local stores don't expose ETags and keep the
-	// existing cheap local-roundtrip verification.
+	// Some stores return an ETag from PUT. When it exactly matches the local
+	// MD5 we can skip the extra Get; otherwise fall back to downloading and
+	// checking the segment SHA-256 because S3-compatible ETags are not always
+	// MD5 digests.
 	if etagImmutable, ok := store.(ETagImmutableObjectStore); ok {
 		localMD5 := localMD5Hex(data)
 		etag, putErr := etagImmutable.PutIfAbsentReturningETag(ctx, segment.Key, data)
@@ -281,21 +279,15 @@ func putImmutableSegment(ctx context.Context, store ObjectStore, segment Segment
 	return true, nil
 }
 
-// verifyUploadETag short-circuits remote verification when the store
-// returned a usable ETag (the MD5 of the uploaded body, returned by S3 for
-// non-multipart PUTs). If the ETag is empty or indicates a multipart upload
-// (contains "-"), it falls back to the re-download path. A non-empty
-// non-multipart ETag that does not match the local MD5 is reported as a
-// verification failure without any further round-trip.
+// verifyUploadETag short-circuits remote verification only when the returned
+// ETag exactly matches MD5(data). Empty, multipart, opaque, encrypted, or
+// otherwise non-MD5 ETags fall back to the re-download path.
 func verifyUploadETag(ctx context.Context, store ObjectStore, segment SegmentManifest, etag, localMD5 string) error {
 	etag = strings.ToLower(strings.Trim(etag, "\""))
-	if etag == "" || strings.Contains(etag, "-") {
-		return verifyStoredSegment(ctx, store, segment)
+	if etag != "" && !strings.Contains(etag, "-") && etag == localMD5 {
+		return nil
 	}
-	if etag != localMD5 {
-		return fmt.Errorf("object %s differs from expected segment", segment.Key)
-	}
-	return nil
+	return verifyStoredSegment(ctx, store, segment)
 }
 
 // verifyStoredSegment downloads the stored object and recomputes its hash

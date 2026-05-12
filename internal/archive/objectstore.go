@@ -38,10 +38,8 @@ type ImmutableObjectStore interface {
 
 // ETagImmutableObjectStore is an optional capability for object stores
 // (currently only S3) that can return an ETag from PutIfAbsent. Callers can
-// compare the returned ETag against a locally computed MD5 to verify the
-// upload without an extra round-trip Get. An empty etag, or one containing
-// a "-" (indicating a multipart upload whose ETag is not a plain MD5), means
-// the caller should fall back to re-downloading and re-hashing the object.
+// compare the returned ETag against a locally computed MD5 and skip an extra
+// round-trip only on an exact match. Other ETag forms are treated as opaque.
 type ETagImmutableObjectStore interface {
 	ImmutableObjectStore
 	PutIfAbsentReturningETag(ctx context.Context, key string, data []byte) (etag string, err error)

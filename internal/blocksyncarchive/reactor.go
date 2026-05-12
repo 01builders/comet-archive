@@ -118,6 +118,9 @@ func (r *Reactor) OnStart() error {
 	// AddPeer doesn't see a zero cold range.
 	r.cachedRange.Store(PeerRange{})
 	if r.opts.ColdBlockSource != nil {
+		r.refreshAdvertisedRangeWithTimeout()
+	}
+	if r.opts.ColdBlockSource != nil {
 		for range r.opts.ColdRequestWorkers {
 			r.wg.Add(1)
 			go func() {
@@ -246,6 +249,10 @@ func (r *Reactor) ActiveColdBlockRequests() int64 {
 // synchronously. External callers (CLI, tests) use this; the p2p Receive
 // goroutine reads cachedAdvertisedRange directly via sendStatus.
 func (r *Reactor) AdvertisedRange() PeerRange {
+	return r.refreshAdvertisedRangeWithTimeout()
+}
+
+func (r *Reactor) refreshAdvertisedRangeWithTimeout() PeerRange {
 	ctx, cancel := context.WithTimeout(r.lifetimeContext(), r.opts.RequestTimeout)
 	defer cancel()
 	return r.refreshAdvertisedRange(ctx)
@@ -582,9 +589,7 @@ func (r *Reactor) exchangeStatuses() {
 	// Refresh the cached cold-source advertised range here so subsequent
 	// sendStatus calls from Receive observe a recent snapshot without
 	// blocking on S3.
-	ctx, cancel := context.WithTimeout(r.lifetimeContext(), r.opts.RequestTimeout)
-	r.refreshAdvertisedRange(ctx)
-	cancel()
+	r.refreshAdvertisedRangeWithTimeout()
 	r.requestPeerStatuses()
 	r.broadcastStatus()
 }
