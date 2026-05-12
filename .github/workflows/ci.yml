@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test, Lint, Race
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out cometbft-archive
+        uses: actions/checkout@v4
+        with:
+          path: cometbft-archive
+
+      - name: Check out CometBFT dependency
+        uses: actions/checkout@v4
+        with:
+          repository: cometbft/cometbft
+          ref: 3b0311fc6a8c6b7024e3b1e226a5f9808ba3ccf1
+          path: cometbft
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: cometbft-archive/go.mod
+          cache-dependency-path: |
+            cometbft-archive/go.sum
+            cometbft/go.sum
+
+      - name: Verify dependencies
+        working-directory: cometbft-archive
+        run: |
+          make verify-cometbft
+          go mod verify
+
+      - name: Check formatting
+        working-directory: cometbft-archive
+        run: make fmt-check
+
+      - name: Check package loading
+        working-directory: cometbft-archive
+        run: go list ./...
+
+      - name: Test
+        working-directory: cometbft-archive
+        run: make test
+
+      - name: Real CometBFT e2e
+        working-directory: cometbft-archive
+        run: make e2e-real-cometbft
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          working-directory: cometbft-archive
+          version: v2.12.2
+          args: ./...
+
+      - name: Race
+        working-directory: cometbft-archive
+        run: make race
