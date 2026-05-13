@@ -389,7 +389,7 @@ type opaqueETagSegmentStore struct {
 }
 
 func (s opaqueETagSegmentStore) PutReturningETag(ctx context.Context, key string, data []byte) (string, error) {
-	if err := s.ObjectStore.Put(ctx, key, data); err != nil {
+	if err := s.Put(ctx, key, data); err != nil {
 		return "", err
 	}
 	return "opaque-etag", nil
@@ -403,7 +403,7 @@ func (s opaqueETagSegmentStore) PutIfAbsent(ctx context.Context, key string, dat
 func (s opaqueETagSegmentStore) PutIfAbsentReturningETag(ctx context.Context, key string, data []byte) (string, error) {
 	immutableStore, ok := s.ObjectStore.(ImmutableObjectStore)
 	if !ok {
-		exists, err := s.ObjectStore.Exists(ctx, key)
+		exists, err := s.Exists(ctx, key)
 		if err != nil {
 			return "", err
 		}

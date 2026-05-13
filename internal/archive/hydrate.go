@@ -146,9 +146,7 @@ func Hydrate(ctx context.Context, store ObjectStore, opts HydrateOptions) (Hydra
 	jobs := make(chan int)
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for slot := range jobs {
 				if err := workerCtx.Err(); err != nil {
 					results[slot] <- segResult{err: err}
@@ -169,7 +167,7 @@ func Hydrate(ctx context.Context, store ObjectStore, opts HydrateOptions) (Hydra
 				}
 				results[slot] <- segResult{records: records}
 			}
-		}()
+		})
 	}
 
 	// Submit jobs in a separate goroutine so the main goroutine can consume

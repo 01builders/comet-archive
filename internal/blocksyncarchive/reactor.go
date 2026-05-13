@@ -267,7 +267,10 @@ func (r *Reactor) cachedAdvertisedRange() PeerRange {
 	if r.opts.ColdBlockSource == nil {
 		return hot
 	}
-	cached, _ := r.cachedRange.Load().(PeerRange)
+	cached, ok := r.cachedRange.Load().(PeerRange)
+	if !ok {
+		return hot
+	}
 	return mergeAdvertisedRanges(cached, hot)
 }
 

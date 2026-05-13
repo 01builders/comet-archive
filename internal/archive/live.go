@@ -2,7 +2,7 @@ package archive
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // MD5 is required only for non-security S3 ETag comparison.
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -307,6 +307,6 @@ func verifyStoredSegment(ctx context.Context, store ObjectStore, segment Segment
 }
 
 func localMD5Hex(data []byte) string {
-	sum := md5.Sum(data)
+	sum := md5.Sum(data) //nolint:gosec // MD5 is required only for non-security S3 ETag comparison.
 	return hex.EncodeToString(sum[:])
 }

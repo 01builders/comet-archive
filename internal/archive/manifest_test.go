@@ -64,7 +64,8 @@ func TestManifestAppendSegmentInPlace(t *testing.T) {
 	}
 	created := manifest.CreatedAt
 	now := time.Now().UTC()
-	if err := manifest.AppendSegmentInPlace(segA, now); err != nil {
+	err = manifest.AppendSegmentInPlace(segA, now)
+	if err != nil {
 		t.Fatalf("append first: %v", err)
 	}
 	if manifest.FirstHeight != 1 || manifest.LastHeight != 1 || len(manifest.Segments) != 1 {
@@ -73,13 +74,15 @@ func TestManifestAppendSegmentInPlace(t *testing.T) {
 	if !manifest.CreatedAt.Equal(created) {
 		t.Fatalf("created_at changed: %v != %v", manifest.CreatedAt, created)
 	}
-	if err := manifest.AppendSegmentInPlace(segB, now.Add(time.Second)); err != nil {
+	err = manifest.AppendSegmentInPlace(segB, now.Add(time.Second))
+	if err != nil {
 		t.Fatalf("append second: %v", err)
 	}
 	if manifest.LastHeight != 2 || len(manifest.Segments) != 2 {
 		t.Fatalf("manifest after second append: %+v", manifest)
 	}
-	if err := manifest.Validate(); err != nil {
+	err = manifest.Validate()
+	if err != nil {
 		t.Fatalf("manifest invalid after appends: %v", err)
 	}
 

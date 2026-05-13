@@ -196,9 +196,7 @@ func verifyCompletedMigrationSegments(ctx context.Context, store ObjectStore, se
 
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range jobs {
 				if err := workerCtx.Err(); err != nil {
 					errs[i] = err
@@ -209,7 +207,7 @@ func verifyCompletedMigrationSegments(ctx context.Context, store ObjectStore, se
 					cancel()
 				}
 			}
-		}()
+		})
 	}
 
 	for i := range segments {
@@ -252,7 +250,7 @@ func verifyCompletedSegment(ctx context.Context, store ObjectStore, segment Segm
 // firstSegmentError returns the first non-nil error in segment order, preferring
 // real errors over context cancellation derived from a peer failure. If only
 // context errors remain and ctxErr is non-nil (the caller's context was
-// cancelled externally), that is returned instead.
+// canceled externally), that is returned instead.
 func firstSegmentError(errs []error, ctxErr error) error {
 	for _, err := range errs {
 		if err != nil && !errors.Is(err, context.Canceled) {

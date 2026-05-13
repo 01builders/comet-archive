@@ -57,9 +57,7 @@ func Verify(ctx context.Context, store ObjectStore, opts VerifyOptions) (VerifyR
 	jobs := make(chan int)
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for i := range jobs {
 				if err := workerCtx.Err(); err != nil {
 					errs[i] = err
@@ -75,7 +73,7 @@ func Verify(ctx context.Context, store ObjectStore, opts VerifyOptions) (VerifyR
 				atomic.AddInt64(&blocksChecked, int64(blocks))
 				atomic.AddInt64(&segmentsChecked, 1)
 			}
-		}()
+		})
 	}
 
 	for i := range manifest.Segments {
@@ -86,7 +84,7 @@ func Verify(ctx context.Context, store ObjectStore, opts VerifyOptions) (VerifyR
 			if err := firstSegmentError(errs, ctx.Err()); err != nil {
 				return VerifyResult{}, err
 			}
-			// no errors recorded — context was cancelled externally
+			// no errors recorded — context was canceled externally
 			return VerifyResult{}, ctx.Err()
 		case jobs <- i:
 		}
