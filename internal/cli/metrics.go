@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net"
 	"net/http"
 	"sync"
@@ -54,9 +55,9 @@ func (s *liveMaintenanceStats) recordArchive(blocks int, err error) {
 	if s == nil {
 		return
 	}
-	now := time.Now().UTC().UnixNano()
+	nowNano := time.Now().UTC().UnixNano()
 	s.archiveRuns.Add(1)
-	s.lastArchiveAttemptUnixNano.Store(now)
+	s.lastArchiveAttemptUnixNano.Store(nowNano)
 	if err != nil {
 		s.archiveErrors.Add(1)
 		s.setLastArchiveError(err.Error())
@@ -64,16 +65,16 @@ func (s *liveMaintenanceStats) recordArchive(blocks int, err error) {
 	}
 	s.setLastArchiveError("")
 	s.blocksArchived.Add(int64(blocks))
-	s.lastArchiveUnixNano.Store(now)
+	s.lastArchiveUnixNano.Store(nowNano)
 }
 
 func (s *liveMaintenanceStats) recordPrune(blocks uint64, err error) {
 	if s == nil {
 		return
 	}
-	now := time.Now().UTC().UnixNano()
+	nowNano := time.Now().UTC().UnixNano()
 	s.pruneRuns.Add(1)
-	s.lastPruneAttemptUnixNano.Store(now)
+	s.lastPruneAttemptUnixNano.Store(nowNano)
 	if err != nil {
 		s.pruneErrors.Add(1)
 		s.setLastPruneError(err.Error())
@@ -81,7 +82,7 @@ func (s *liveMaintenanceStats) recordPrune(blocks uint64, err error) {
 	}
 	s.setLastPruneError("")
 	s.blocksPruned.Add(int64(blocks))
-	s.lastPruneUnixNano.Store(now)
+	s.lastPruneUnixNano.Store(nowNano)
 }
 
 func (s *liveMaintenanceStats) snapshot() map[string]any {
@@ -190,9 +191,7 @@ func mergedStatusSnapshot(stats *liveMaintenanceStats, statusSnapshots []liveSta
 		if statusSnapshot == nil {
 			continue
 		}
-		for key, value := range statusSnapshot() {
-			snapshot[key] = value
-		}
+		maps.Copy(snapshot, statusSnapshot())
 	}
 	return snapshot
 }

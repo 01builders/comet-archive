@@ -1,4 +1,5 @@
 COMETBFT_REF := 3b0311fc6a8c6b7024e3b1e226a5f9808ba3ccf1
+GOVULNCHECK_VERSION := v1.9.0
 GOFMT_FILES := $(shell find . -name '*.go' -not -path './vendor/*')
 SOAK_METRICS_URL ?=
 SOAK_DURATION ?= 24h
@@ -9,7 +10,7 @@ SOAK_MIN_COLD_RESPONSES_DELTA ?= 1
 SOAK_MAX_COLD_QUEUE ?= 0
 SOAK_MAX_BUFFERED_RESPONSES ?= 64
 
-.PHONY: fmt fmt-check test e2e-real-cometbft production-soak lint race verify-cometbft
+.PHONY: fmt fmt-check test e2e-real-cometbft production-soak lint race verify-cometbft vulncheck
 
 fmt:
 	gofmt -w $(GOFMT_FILES)
@@ -43,3 +44,6 @@ race:
 
 verify-cometbft:
 	test "$$(git -C ../cometbft rev-parse HEAD)" = "$(COMETBFT_REF)"
+
+vulncheck:
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...

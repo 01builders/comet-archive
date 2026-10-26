@@ -67,7 +67,7 @@ linters:
     exhaustive:
       check:
         - switch
-        - map
+        - mapliteral
     gosec:
       excludes:
         - G115
@@ -102,6 +102,8 @@ linters:
         - name: line-length-limit
           disabled: true
         - name: max-public-structs
+          disabled: true
+        - name: multiline-if-init
           disabled: true
         - name: unhandled-error
           arguments:
