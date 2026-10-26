@@ -128,10 +128,7 @@ func Hydrate(ctx context.Context, store ObjectStore, opts HydrateOptions) (Hydra
 		err     error
 	}
 
-	workers := segmentConcurrency(opts.Concurrency)
-	if workers > len(relevant) {
-		workers = len(relevant)
-	}
+	workers := min(segmentConcurrency(opts.Concurrency), len(relevant))
 
 	// Per-slot single-buffered channels preserve manifest order on the writer
 	// side while allowing workers to race ahead within the concurrency bound.

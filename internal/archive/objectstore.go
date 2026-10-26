@@ -56,8 +56,8 @@ func OpenObjectStore(url string) (ObjectStore, error) {
 	if err := ValidateObjectStoreURL(url); err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(url, "file://") {
-		return NewLocalObjectStore(strings.TrimPrefix(url, "file://"))
+	if after, ok := strings.CutPrefix(url, "file://"); ok {
+		return NewLocalObjectStore(after)
 	}
 	if strings.HasPrefix(url, "s3://") {
 		return NewS3ObjectStore(context.Background(), url)
@@ -69,8 +69,8 @@ func OpenObjectStoreReadOnly(url string) (ObjectStore, error) {
 	if err := ValidateObjectStoreURL(url); err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(url, "file://") {
-		store, err := NewLocalObjectStoreReadOnly(strings.TrimPrefix(url, "file://"))
+	if after, ok := strings.CutPrefix(url, "file://"); ok {
+		store, err := NewLocalObjectStoreReadOnly(after)
 		if err != nil {
 			return nil, err
 		}
@@ -114,8 +114,8 @@ func ValidateObjectStoreURL(rawURL string) error {
 	if rawURL == "" {
 		return errors.New("object store URL is required")
 	}
-	if strings.HasPrefix(rawURL, "file://") {
-		if strings.TrimPrefix(rawURL, "file://") == "" {
+	if after, ok := strings.CutPrefix(rawURL, "file://"); ok {
+		if after == "" {
 			return errors.New("file object store URL requires a root path")
 		}
 		return nil
@@ -149,7 +149,7 @@ func validateObjectPath(label string, value string) error {
 	if strings.Contains(value, "\\") {
 		return fmt.Errorf("invalid %s %q", label, value)
 	}
-	for _, part := range strings.Split(value, "/") {
+	for part := range strings.SplitSeq(value, "/") {
 		if part == "" || part == "." || part == ".." {
 			return fmt.Errorf("invalid %s %q", label, value)
 		}
@@ -381,7 +381,7 @@ func rejectLocalObjectSymlink(root, path string) error {
 		return err
 	}
 	current := root
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+	for part := range strings.SplitSeq(rel, string(filepath.Separator)) {
 		if part == "" || part == "." {
 			continue
 		}

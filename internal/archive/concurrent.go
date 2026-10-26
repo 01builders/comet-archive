@@ -16,10 +16,7 @@ func segmentConcurrency(requested int) int {
 	if requested > 0 {
 		return requested
 	}
-	n := runtime.GOMAXPROCS(0)
-	if n < 1 {
-		n = 1
-	}
+	n := max(runtime.GOMAXPROCS(0), 1)
 	if n > defaultSegmentConcurrencyCap {
 		n = defaultSegmentConcurrencyCap
 	}

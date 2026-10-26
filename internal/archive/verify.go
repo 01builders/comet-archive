@@ -42,10 +42,7 @@ func Verify(ctx context.Context, store ObjectStore, opts VerifyOptions) (VerifyR
 		return VerifyResult{}, nil
 	}
 
-	workers := segmentConcurrency(opts.Concurrency)
-	if workers > len(manifest.Segments) {
-		workers = len(manifest.Segments)
-	}
+	workers := min(segmentConcurrency(opts.Concurrency), len(manifest.Segments))
 
 	errs := make([]error, len(manifest.Segments))
 	var blocksChecked int64

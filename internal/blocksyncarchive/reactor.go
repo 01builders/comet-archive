@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -122,26 +123,20 @@ func (r *Reactor) OnStart() error {
 	}
 	if r.opts.ColdBlockSource != nil {
 		for range r.opts.ColdRequestWorkers {
-			r.wg.Add(1)
-			go func() {
-				defer r.wg.Done()
+			r.wg.Go(func() {
 				r.coldBlockWorker()
-			}()
+			})
 		}
 	}
 	if r.opts.RequestTimeout > 0 {
-		r.wg.Add(1)
-		go func() {
-			defer r.wg.Done()
+		r.wg.Go(func() {
 			r.requestTimeoutLoop()
-		}()
+		})
 	}
 	if r.opts.StatusRequestInterval > 0 {
-		r.wg.Add(1)
-		go func() {
-			defer r.wg.Done()
+		r.wg.Go(func() {
 			r.statusRequestLoop()
-		}()
+		})
 	}
 	return nil
 }
@@ -637,9 +632,7 @@ func (r *Reactor) planAndSend() {
 		return
 	}
 	peers := make(map[PeerID]p2p.Peer, len(r.peers))
-	for id, peer := range r.peers {
-		peers[id] = peer
-	}
+	maps.Copy(peers, r.peers)
 	r.mu.Unlock()
 
 	for _, request := range requests {

@@ -121,10 +121,7 @@ func Migrate(ctx context.Context, reader BlockReader, store ObjectStore, opts Mi
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return MigrationResult{}, ctxErr
 		}
-		last := height + int64(opts.SegmentBlocks) - 1
-		if last > end {
-			last = end
-		}
+		last := min(height+int64(opts.SegmentBlocks)-1, end)
 		segment, uploaded, segErr := buildAndUploadSegment(ctx, reader, store, opts.ChainID, opts.Prefix, opts.Compression, height, last)
 		if segErr != nil {
 			return MigrationResult{}, segErr
@@ -182,10 +179,7 @@ func verifyCompletedMigrationSegments(ctx context.Context, store ObjectStore, se
 	if len(segments) == 0 {
 		return nil
 	}
-	workers := segmentConcurrency(concurrency)
-	if workers > len(segments) {
-		workers = len(segments)
-	}
+	workers := min(segmentConcurrency(concurrency), len(segments))
 
 	errs := make([]error, len(segments))
 	jobs := make(chan int)

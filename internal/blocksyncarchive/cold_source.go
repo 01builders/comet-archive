@@ -153,13 +153,7 @@ func mergeAdvertisedRanges(cold, hot PeerRange) PeerRange {
 		}
 		return cold
 	}
-	base := cold.Base
-	if hot.Base < base {
-		base = hot.Base
-	}
-	height := cold.Height
-	if hot.Height > height {
-		height = hot.Height
-	}
+	base := min(hot.Base, cold.Base)
+	height := max(hot.Height, cold.Height)
 	return PeerRange{Base: base, Height: height}
 }
