@@ -172,7 +172,7 @@ func NewLocalObjectStore(root string) (*LocalObjectStore, error) {
 	if err := rejectLocalObjectStoreRootSymlink(root); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := makeDirectoriesDurable(root); err != nil {
 		return nil, err
 	}
 	return &LocalObjectStore{root: root}, nil
@@ -211,7 +211,7 @@ func (s *LocalObjectStore) Put(_ context.Context, key string, data []byte) error
 	if symlinkErr := rejectLocalObjectSymlink(s.root, filepath.Dir(path)); symlinkErr != nil {
 		return symlinkErr
 	}
-	mkdirErr := os.MkdirAll(filepath.Dir(path), 0o755)
+	mkdirErr := makeDirectoriesDurable(filepath.Dir(path))
 	if mkdirErr != nil {
 		return mkdirErr
 	}
@@ -235,7 +235,10 @@ func (s *LocalObjectStore) Put(_ context.Context, key string, data []byte) error
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
 }
 
 func (s *LocalObjectStore) PutIfAbsent(_ context.Context, key string, data []byte) error {
@@ -247,7 +250,7 @@ func (s *LocalObjectStore) PutIfAbsent(_ context.Context, key string, data []byt
 	if symlinkErr := rejectLocalObjectSymlink(s.root, dir); symlinkErr != nil {
 		return symlinkErr
 	}
-	if mkdirErr := os.MkdirAll(dir, 0o755); mkdirErr != nil {
+	if mkdirErr := makeDirectoriesDurable(dir); mkdirErr != nil {
 		return mkdirErr
 	}
 	if symlinkErr := rejectLocalObjectSymlink(s.root, dir); symlinkErr != nil {
@@ -280,7 +283,43 @@ func (s *LocalObjectStore) PutIfAbsent(_ context.Context, key string, data []byt
 		}
 		return err
 	}
+	return syncDirectory(dir)
+}
+
+// Persist newly created directory entries as well as the final object entry.
+func makeDirectoriesDurable(path string) error {
+	var missing []string
+	for dir := filepath.Clean(path); ; dir = filepath.Dir(dir) {
+		info, err := os.Stat(dir)
+		if err == nil {
+			if !info.IsDir() {
+				return fmt.Errorf("object directory %q is not a directory", dir)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		missing = append(missing, dir)
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		if err := os.Mkdir(missing[i], 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		if err := syncDirectory(filepath.Dir(missing[i])); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	syncErr := dir.Sync()
+	return errors.Join(syncErr, dir.Close())
 }
 
 func (s *LocalObjectStore) Exists(_ context.Context, key string) (bool, error) {

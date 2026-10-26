@@ -927,6 +927,7 @@ func startLiveIngestorMaintenanceLoop(
 		archiveInterval = 30 * time.Second
 	}
 	lastPrune := time.Time{}
+	verifier := archive.NewIncrementalVerifier(objectStore, pruneOpts.ManifestKey)
 	runMaintenance := func() bool {
 		archived, archiveErr := archive.ArchiveReadyFromHead(ctx, ingestor.BlockReader(), objectStore, archiveOpts, safetyWindow)
 		if archiveErr != nil {
@@ -940,12 +941,7 @@ func startLiveIngestorMaintenanceLoop(
 		if pruneInterval <= 0 || (!lastPrune.IsZero() && time.Since(lastPrune) < pruneInterval) {
 			return true
 		}
-		var pruned archive.PruneHotResult
-		pruneErr := ingestor.WithHotStore(func(blockStore *cmtstore.BlockStore) error {
-			var err error
-			pruned, err = runLivePrune(ctx, blockStore, objectStore, pruneOpts)
-			return err
-		})
+		pruned, pruneErr := runLivePrune(ctx, ingestor, verifier, pruneOpts)
 		if pruneErr != nil {
 			if ctx.Err() != nil {
 				return false
@@ -963,21 +959,27 @@ func startLiveIngestorMaintenanceLoop(
 
 func runLivePrune(
 	ctx context.Context,
-	blockStore *cmtstore.BlockStore,
-	objectStore archive.ObjectStore,
+	ingestor *blocksyncarchive.HotIngestor,
+	verifier *archive.IncrementalVerifier,
 	opts archive.PruneHotOptions,
 ) (archive.PruneHotResult, error) {
-	manifest, err := archive.LoadManifest(ctx, objectStore, opts.ManifestKey)
-	if errors.Is(err, archive.ErrObjectNotFound) {
+	verified, err := verifier.Verify(ctx)
+	if errors.Is(err, archive.ErrManifestNotFound) {
 		return archive.PruneHotResult{}, nil
 	}
 	if err != nil {
-		return archive.PruneHotResult{}, err
+		return archive.PruneHotResult{}, fmt.Errorf("verify archive before prune: %w", err)
 	}
-	if manifest.LastHeight == 0 {
+	if verified.Manifest.LastHeight == 0 {
 		return archive.PruneHotResult{}, nil
 	}
-	return archive.PruneVerifiedHotStore(ctx, blockStore, objectStore, opts)
+	var result archive.PruneHotResult
+	err = ingestor.WithHotStore(func(blockStore *cmtstore.BlockStore) error {
+		var pruneErr error
+		result, pruneErr = archive.PruneHotStore(ctx, blockStore, verified.Manifest, opts)
+		return pruneErr
+	})
+	return result, err
 }
 
 func archiveRange(summary archive.InspectSummary) string {
