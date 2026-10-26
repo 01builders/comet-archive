@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -545,7 +546,7 @@ func TestServeDryRunValidatesP2PAddressConfig(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			args := append(append([]string{}, base...), tc.args...)
+			args := slices.Concat(base, tc.args)
 			out := executeErr(t, args...)
 			if !strings.Contains(out, tc.want) {
 				t.Fatalf("error output missing %q:\n%s", tc.want, out)
@@ -652,7 +653,7 @@ func TestServeDryRunValidatesRuntimeConfig(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			args := append(append([]string{}, base...), tc.args...)
+			args := slices.Concat(base, tc.args)
 			out := executeErr(t, args...)
 			if !strings.Contains(out, tc.want) {
 				t.Fatalf("error output missing %q:\n%s", tc.want, out)
@@ -1006,8 +1007,7 @@ func TestValidationTrustModel(t *testing.T) {
 }
 
 func TestLiveIngestorMaintenanceLoopRetriesArchiveErrors(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	dbDir := filepath.Join(t.TempDir(), "db")
 	createCLIBlockStoreFixture(t, dbDir, 5)
 	reader, err := archive.OpenCometBlockStore(dbDir, "goleveldb")
@@ -1056,8 +1056,7 @@ func TestLiveIngestorMaintenanceLoopRetriesArchiveErrors(t *testing.T) {
 }
 
 func TestLiveIngestorMaintenanceLoopDoesNotExitOrPruneOnCorruptArchive(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	dbDir := filepath.Join(t.TempDir(), "db")
 	createCLIBlockStoreFixture(t, dbDir, 4)
 	reader, err := archive.OpenCometBlockStore(dbDir, "goleveldb")
@@ -1125,8 +1124,7 @@ func TestLiveIngestorMaintenanceLoopDoesNotExitOrPruneOnCorruptArchive(t *testin
 }
 
 func TestLiveIngestorMaintenanceLoopArchivesThenPrunes(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	dbDir := filepath.Join(t.TempDir(), "db")
 	createCLIBlockStoreFixture(t, dbDir, 5)
 	reader, err := archive.OpenCometBlockStore(dbDir, "goleveldb")
@@ -1175,8 +1173,7 @@ func TestLiveIngestorMaintenanceLoopArchivesThenPrunes(t *testing.T) {
 }
 
 func TestLiveIngestorMaintenanceLoopDoesNotBlockIngestDuringArchiveUpload(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	dbDir := filepath.Join(t.TempDir(), "db")
 	createCLIBlockStoreFixture(t, dbDir, 5)
 	reader, err := archive.OpenCometBlockStore(dbDir, "goleveldb")
@@ -1253,8 +1250,7 @@ func TestLiveIngestorMaintenanceLoopDoesNotBlockIngestDuringArchiveUpload(t *tes
 }
 
 func TestMetricsServerReportsMaintenanceStats(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stats := newLiveMaintenanceStats()
 	stats.recordArchive(3, nil)
 	stats.recordPrune(2, nil)
@@ -1378,8 +1374,7 @@ func TestMetricsServerReportsAndClearsLastErrors(t *testing.T) {
 }
 
 func TestMetricsServerReadinessRequiresLiveP2PStatus(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	addr, err := startMetricsServer(ctx, "127.0.0.1:0", newLiveMaintenanceStats(), func() map[string]any {
 		return map[string]any{
 			liveMetricP2PPeers:       0,
@@ -1409,8 +1404,7 @@ func TestMetricsServerReadinessRequiresLiveP2PStatus(t *testing.T) {
 }
 
 func TestMetricsServerReadinessFailsClosedWithoutP2PStatus(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	addr, err := startMetricsServer(ctx, "127.0.0.1:0", newLiveMaintenanceStats())
 	if err != nil {
 		t.Fatal(err)

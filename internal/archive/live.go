@@ -121,10 +121,7 @@ func ArchiveReady(ctx context.Context, reader BlockReader, store ObjectStore, op
 	if sourceHeight == 0 {
 		return LiveArchiveResult{}, errors.New("source blockstore is empty")
 	}
-	end := opts.ReadyHeight
-	if end > sourceHeight {
-		end = sourceHeight
-	}
+	end := min(opts.ReadyHeight, sourceHeight)
 	result := LiveArchiveResult{ManifestKey: manifestKey}
 	if end < nextHeight {
 		result.Manifest = manifest
@@ -135,10 +132,7 @@ func ArchiveReady(ctx context.Context, reader BlockReader, store ObjectStore, op
 		if err := ctx.Err(); err != nil {
 			return LiveArchiveResult{}, err
 		}
-		last := height + int64(opts.SegmentBlocks) - 1
-		if last > end {
-			last = end
-		}
+		last := min(height+int64(opts.SegmentBlocks)-1, end)
 		segment, uploaded, err := buildAndUploadSegment(ctx, reader, store, opts.ChainID, opts.Prefix, opts.Compression, height, last)
 		if err != nil {
 			return LiveArchiveResult{}, err

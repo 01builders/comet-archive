@@ -122,10 +122,7 @@ func runSoakCheck(ctx context.Context, opts soakOptions) (soakResult, error) {
 			result.MaxBufferedResponses = sample.Buffered
 		}
 		if sample.HasNextHeight {
-			headLag := sample.PeerBestHeight - sample.NextHeight + 1
-			if headLag < 0 {
-				headLag = 0
-			}
+			headLag := max(sample.PeerBestHeight-sample.NextHeight+1, 0)
 			if headLag > result.MaxHeadLag {
 				result.MaxHeadLag = headLag
 			}

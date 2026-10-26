@@ -9,25 +9,29 @@ on:
 permissions:
   contents: read
 
+env:
+  # Keep in sync with COMETBFT_REF in the Makefile.
+  COMETBFT_REF: 3b0311fc6a8c6b7024e3b1e226a5f9808ba3ccf1
+
 jobs:
   verify:
     name: Verify
     runs-on: ubuntu-latest
     steps:
       - name: Check out cometbft-archive
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: cometbft-archive
 
       - name: Check out CometBFT dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cometbft/cometbft
-          ref: 3b0311fc6a8c6b7024e3b1e226a5f9808ba3ccf1
+          ref: ${{ env.COMETBFT_REF }}
           path: cometbft
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: cometbft-archive/go.mod
           cache-dependency-path: |
@@ -39,6 +43,10 @@ jobs:
         run: |
           make verify-cometbft
           go mod verify
+
+      - name: Check vulnerabilities
+        working-directory: cometbft-archive
+        run: make vulncheck
 
       - name: Check formatting
         working-directory: cometbft-archive
@@ -53,19 +61,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out cometbft-archive
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: cometbft-archive
 
       - name: Check out CometBFT dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cometbft/cometbft
-          ref: 3b0311fc6a8c6b7024e3b1e226a5f9808ba3ccf1
+          ref: ${{ env.COMETBFT_REF }}
           path: cometbft
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: cometbft-archive/go.mod
           cache-dependency-path: |
@@ -81,19 +89,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out cometbft-archive
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: cometbft-archive
 
       - name: Check out CometBFT dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cometbft/cometbft
-          ref: 3b0311fc6a8c6b7024e3b1e226a5f9808ba3ccf1
+          ref: ${{ env.COMETBFT_REF }}
           path: cometbft
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: cometbft-archive/go.mod
           cache-dependency-path: |
@@ -109,19 +117,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out cometbft-archive
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: cometbft-archive
 
       - name: Check out CometBFT dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cometbft/cometbft
-          ref: 3b0311fc6a8c6b7024e3b1e226a5f9808ba3ccf1
+          ref: ${{ env.COMETBFT_REF }}
           path: cometbft
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: cometbft-archive/go.mod
           cache-dependency-path: |
@@ -129,10 +137,10 @@ jobs:
             cometbft/go.sum
 
       - name: Lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           working-directory: cometbft-archive
-          version: v2.12.2
+          version: v2.15.0
           args: ./...
 
   race:
@@ -140,19 +148,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out cometbft-archive
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: cometbft-archive
 
       - name: Check out CometBFT dependency
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cometbft/cometbft
-          ref: 3b0311fc6a8c6b7024e3b1e226a5f9808ba3ccf1
+          ref: ${{ env.COMETBFT_REF }}
           path: cometbft
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: cometbft-archive/go.mod
           cache-dependency-path: |
