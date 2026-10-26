@@ -40,6 +40,7 @@ type Reactor struct {
 	mu                sync.Mutex
 	peers             map[PeerID]p2p.Peer
 	bufferedResponses map[int64]bufferedBlockResponse
+	coldBudgets       map[PeerID]coldPeerBudget
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -51,6 +52,7 @@ type Reactor struct {
 	noBlockResponses atomic.Int64
 	coldErrors       atomic.Int64
 	coldQueueFull    atomic.Int64
+	coldRateLimited  atomic.Int64
 	coldActive       atomic.Int64
 
 	// cachedRange holds the most recently computed advertised range (hot + cold).
@@ -59,6 +61,17 @@ type Reactor struct {
 	// receive goroutine on a cold-source roundtrip.
 	cachedRange atomic.Value // PeerRange
 }
+
+type coldPeerBudget struct {
+	tokens  float64
+	updated time.Time
+}
+
+const (
+	coldPeerBurst             = 64
+	coldPeerRequestsPerSecond = 32
+	maxColdPeerBudgets        = 1024
+)
 
 type coldBlockRequest struct {
 	peer   p2p.Peer
@@ -108,6 +121,7 @@ func NewReactor(ingestor *HotIngestor, planner *RequestPlanner, opts ReactorOpti
 		coldWork:          make(chan coldBlockRequest, opts.RequestLimit),
 		peers:             make(map[PeerID]p2p.Peer),
 		bufferedResponses: make(map[int64]bufferedBlockResponse),
+		coldBudgets:       make(map[PeerID]coldPeerBudget),
 	}
 	r.BaseReactor = *p2p.NewBaseReactor(ReactorName, r)
 	return r, nil
@@ -179,6 +193,7 @@ func (r *Reactor) RemovePeer(peer p2p.Peer, _ any) {
 	r.mu.Lock()
 	peerID := PeerID(peer.ID())
 	delete(r.peers, peerID)
+	delete(r.coldBudgets, peerID)
 	r.planner.RemovePeer(peerID)
 	r.dropBufferedResponsesFromPeerLocked(peerID)
 	r.mu.Unlock()
@@ -232,6 +247,8 @@ func (r *Reactor) ColdQueueFull() int64 {
 	return r.coldQueueFull.Load()
 }
 
+func (r *Reactor) ColdRateLimited() int64 { return r.coldRateLimited.Load() }
+
 func (r *Reactor) QueuedColdBlockRequests() int {
 	return len(r.coldWork)
 }
@@ -278,6 +295,7 @@ func (r *Reactor) lifetimeContext() context.Context {
 
 func (r *Reactor) Receive(e p2p.Envelope) {
 	if err := cmtblocksync.ValidateMsg(e.Message); err != nil {
+		r.disconnectPeer(e.Src, err)
 		return
 	}
 	switch msg := e.Message.(type) {
@@ -319,9 +337,7 @@ func (r *Reactor) respondToBlockRequest(peer p2p.Peer, height int64) {
 		// check; the cold worker's LoadBlock already returns
 		// ErrColdBlockNotFound for heights outside the manifest. This keeps
 		// the p2p receive goroutine off any S3 round-trip.
-		if !r.enqueueColdBlockRequest(peer, height) {
-			r.coldQueueFull.Add(1)
-		}
+		r.enqueueColdBlockRequest(peer, height)
 		return
 	}
 	if sendNoBlock(peer, height) {
@@ -365,10 +381,37 @@ func (r *Reactor) respondToColdBlockRequest(peer p2p.Peer, height int64) {
 }
 
 func (r *Reactor) enqueueColdBlockRequest(peer p2p.Peer, height int64) bool {
+	if peer == nil {
+		return false
+	}
+	now := time.Now()
+	id := PeerID(peer.ID())
+	r.mu.Lock()
+	budget, ok := r.coldBudgets[id]
+	if !ok {
+		if len(r.coldBudgets) >= maxColdPeerBudgets {
+			r.coldRateLimited.Add(1)
+			r.mu.Unlock()
+			return false
+		}
+		budget = coldPeerBudget{tokens: coldPeerBurst, updated: now}
+	}
+	budget.tokens = min(coldPeerBurst, budget.tokens+now.Sub(budget.updated).Seconds()*coldPeerRequestsPerSecond)
+	budget.updated = now
+	if budget.tokens < 1 {
+		r.coldRateLimited.Add(1)
+		r.coldBudgets[id] = budget
+		r.mu.Unlock()
+		return false
+	}
+	budget.tokens--
+	r.coldBudgets[id] = budget
+	r.mu.Unlock()
 	select {
 	case r.coldWork <- coldBlockRequest{peer: peer, height: height}:
 		return true
 	default:
+		r.coldQueueFull.Add(1)
 		return false
 	}
 }
@@ -420,6 +463,7 @@ func (r *Reactor) handleBlockResponse(peer p2p.Peer, msg *bcproto.BlockResponse)
 	block, err := types.BlockFromProto(msg.Block)
 	if err != nil {
 		r.markPeerBlockFailed(peer, 0)
+		r.disconnectPeer(peer, err)
 		r.planAndSend()
 		return
 	}
@@ -460,7 +504,10 @@ func (r *Reactor) submitAndDrainBuffered(peerID PeerID, block *types.Block) bool
 				r.planner.RemovePeer(peerID)
 				r.dropBufferedResponsesFromPeerLocked(peerID)
 			}
+			peer := r.peers[peerID]
+			delete(r.peers, peerID)
 			r.mu.Unlock()
+			r.disconnectPeer(peer, err)
 			r.planAndSend()
 			return false
 		}
@@ -681,6 +728,20 @@ func (r *Reactor) dropBufferedResponsesOutsideRangeLocked(peerID PeerID, adverti
 		if buffered.peerID == peerID && !advertised.Contains(height) {
 			delete(r.bufferedResponses, height)
 			r.planner.MarkFailed(height)
+		}
+	}
+}
+
+func (r *Reactor) disconnectPeer(peer p2p.Peer, reason error) {
+	if peer == nil {
+		return
+	}
+	r.RemovePeer(peer, reason)
+	if r.Switch != nil {
+		r.Switch.StopPeerForError(peer, reason)
+	} else {
+		if err := peer.Stop(); err != nil {
+			r.Logger.Debug("stop invalid peer", "peer", peer.ID(), "err", err)
 		}
 	}
 }

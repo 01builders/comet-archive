@@ -1046,7 +1046,7 @@ func newColdArchiveSource(t *testing.T, firstHeight, lastHeight int64) *ArchiveB
 		t.Fatal(err)
 	}
 	manifestKey := archive.ManifestKey("archive", ingestTestChainID, archive.DefaultManifest)
-	if saveErr := archive.SaveManifest(context.Background(), store, manifestKey, manifest); saveErr != nil {
+	if saveErr := archive.SaveManifest(context.Background(), store, manifestKey, &manifest); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	source, err := NewArchiveBlockSource(store, manifestKey)

@@ -23,6 +23,17 @@ Archive segment objects are immutable. Existing objects are reused only when
 size and checksum match, uploads use create-if-absent semantics, and fresh
 uploads are read back and verified before the manifest advertises them.
 
+Manifest publication uses compare-and-swap: S3 writes preserve the exact GET
+ETag in `If-Match`; initial creation uses `If-None-Match: *`. Local stores
+serialize conditional writers with process-shared file locks. A conflicting
+publisher fails without overwriting newer progress. Live maintenance reloads
+on its next attempt; rerun a failed migration to resume from its checkpoint.
+S3 conditional-write conflicts (409) retry at most twice with cancellation.
+
+Manifests remain v1 JSON with inline segment and block indexes. Migration
+resume state retains its existing JSON layout. Conditional publication does
+not change either storage format.
+
 See [docs/architecture.md](docs/architecture.md) for the storage layout and
 protocol model, [docs/operations.md](docs/operations.md) for preflight,
 metrics, and soak guidance.
@@ -32,13 +43,27 @@ metrics, and soak guidance.
 Live ingest defaults to `--validation=storage-only`. Stronger modes:
 
 - `--validation=checkpoint --checkpoint <height>:<hexhash>` pins trusted block
-  hashes at selected heights.
+  hashes at selected heights. Archiving stops at the last matching checkpoint
+  reached through a continuous hash-linked chain, further bounded by the
+  safety window and persisted height. Hot blocks above that checkpoint may
+  still be served, but are unauthenticated. Supply later checkpoints to
+  advance the archive. Startup checks a retained checkpoint and its stored
+  predecessors before restoring the authenticated height; if every
+  checkpoint has been pruned, archiving waits for a new checkpoint.
 - `--validation=validator-set --validator-set <height>:<validators.pb>`
   verifies the next block's `LastCommit` against an operator-supplied
   `tendermint.types.ValidatorSet`.
 - `--validator-set-rpc <rpc-url>` fetches missing validator sets from a
   trusted CometBFT RPC endpoint on demand. RPC-only mode is trust-on-RPC; use
   pinned files or checkpoints when independent rejection is required.
+
+Cold serving retains up to 64 MiB of decoded segment records and coalesces
+concurrent loads of the same segment. At most four distinct segments load
+at once; oversized segments are served without retention. Each peer has a
+64-request burst allowance refilling at 32 cold requests per second.
+Excess requests are dropped for the peer to retry. Malformed protocol
+messages and rejected block responses disconnect the sender. Object reads
+are capped at 1 GiB plus 1 MiB of encoding overhead.
 
 ## Metrics and health
 
@@ -50,7 +75,8 @@ attempted/successful maintenance times, P2P peer count, peer best height,
 blocksync inflight requests, buffered out-of-order responses, request
 timeouts, local hot range, combined served range, hot/cold/no-block serving
 counters, cold serving errors, active cold reads, cold queue depth and
-queue-full events, next ingest height, and pending block height.
+queue-full events, rate-limited cold requests, the archive validation height
+limit, next ingest height, and pending block height.
 
 ## Serve config
 

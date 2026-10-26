@@ -192,7 +192,7 @@ func TestPruneRefusesForeignArchive(t *testing.T) {
 				}
 				manifest.Segments[len(manifest.Segments)-1] = segment
 			}
-			if err := SaveManifest(t.Context(), objects, opts.ManifestKey, manifest); err != nil {
+			if err := SaveManifest(t.Context(), objects, opts.ManifestKey, &manifest); err != nil {
 				t.Fatal(err)
 			}
 			_, err := PruneVerifiedHotStore(t.Context(), hot, objects, opts)
@@ -213,17 +213,17 @@ type growingManifestStore struct {
 	grow         func() error
 }
 
-func (s *growingManifestStore) Get(ctx context.Context, key string) ([]byte, error) {
-	data, err := s.ObjectStore.Get(ctx, key)
+func (s *growingManifestStore) GetVersioned(ctx context.Context, key string) ([]byte, string, error) {
+	data, revision, err := s.ObjectStore.GetVersioned(ctx, key)
 	if err == nil && key == s.manifestKey {
 		s.manifestGets++
 		if s.manifestGets == 1 {
 			if growErr := s.grow(); growErr != nil {
-				return nil, growErr
+				return nil, "", growErr
 			}
 		}
 	}
-	return data, err
+	return data, revision, err
 }
 
 func TestPruneUsesVerifiedManifestSnapshot(t *testing.T) {
@@ -328,7 +328,7 @@ func TestIncrementalVerifyRechecksChangedDescriptor(t *testing.T) {
 			default:
 				t.Fatalf("unexpected field %q", field)
 			}
-			if err := SaveManifest(t.Context(), objects, opts.ManifestKey, manifest); err != nil {
+			if err := SaveManifest(t.Context(), objects, opts.ManifestKey, &manifest); err != nil {
 				t.Fatal(err)
 			}
 			result, err := verifier.Verify(t.Context())
@@ -348,7 +348,7 @@ func TestPruneRefusesUnarchivedHotPrefix(t *testing.T) {
 	manifest := archived.Manifest
 	manifest.Segments = manifest.Segments[1:]
 	manifest.FirstHeight = manifest.Segments[0].FirstHeight
-	if err := SaveManifest(t.Context(), objects, opts.ManifestKey, manifest); err != nil {
+	if err := SaveManifest(t.Context(), objects, opts.ManifestKey, &manifest); err != nil {
 		t.Fatal(err)
 	}
 	_, err := PruneVerifiedHotStore(t.Context(), hot, objects, opts)
@@ -367,11 +367,18 @@ func TestVerifyDistinguishesMissingManifestAndSegment(t *testing.T) {
 	}
 	manifest := archived.Manifest
 	manifest.Segments[0].Key += ".missing"
-	if err := SaveManifest(t.Context(), objects, opts.ManifestKey, manifest); err != nil {
+	if err := SaveManifest(t.Context(), objects, opts.ManifestKey, &manifest); err != nil {
 		t.Fatal(err)
 	}
 	_, err := NewIncrementalVerifier(objects, opts.ManifestKey).Verify(t.Context())
 	if !errors.Is(err, ErrObjectNotFound) || errors.Is(err, ErrManifestNotFound) {
 		t.Fatalf("missing segment must fail verification: %v", err)
 	}
+}
+
+func (s *countingGetStore) GetVersioned(ctx context.Context, key string) ([]byte, string, error) {
+	s.mu.Lock()
+	s.gets[key]++
+	s.mu.Unlock()
+	return s.ObjectStore.GetVersioned(ctx, key)
 }

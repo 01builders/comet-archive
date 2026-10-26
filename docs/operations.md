@@ -53,10 +53,13 @@ Recommended production config choices:
   metrics collector
 - keep `retain_blocks` comfortably larger than the safety window and larger
   than the expected operational recovery window
-- run only one writer for a given archive namespace. The namespace is the
+- prefer one writer for a given archive namespace. The namespace is the
   combination of object-store URL prefix, archive `prefix`, `chain_id`, and
   `manifest_name`. Extra archive peers may use distinct manifests or read-only
-  verification, but two live writers must not publish the same manifest key
+  verification. Conditional manifest and resume-state writes reject stale
+  publishers without overwriting newer progress; rerun a failed migration
+  after resolving contention. Manifests remain v1 with inline segment and
+  block indexes; resume-state JSON retains its existing layout
 - if `manifest_key` or `--manifest-key` is used, use that same explicit key for
   migration, live serving, verification, cold serving, and pruning. Writer
   commands publish to the explicit key rather than the derived
@@ -100,6 +103,8 @@ gauges:
 - `blocksync_cold_active`
 - `blocksync_cold_queue`
 - `blocksync_cold_queue_full`
+- `blocksync_cold_rate_limited`
+- `archive_validation_height_limit`
 - `hot_base`, `hot_height`
 - `served_base`, `served_height`
 - `next_height`

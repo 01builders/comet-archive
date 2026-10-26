@@ -515,6 +515,9 @@ func decodeRecords(payload []byte) ([]BlockRecord, error) {
 	r := bytes.NewReader(payload)
 	var records []BlockRecord
 	for r.Len() > 0 {
+		if len(records) >= MaxSegmentBlocks {
+			return nil, errors.New("segment record count exceeds maximum")
+		}
 		var height int64
 		if err := binary.Read(r, binary.BigEndian, &height); err != nil {
 			return nil, err
@@ -531,7 +534,7 @@ func decodeRecords(payload []byte) ([]BlockRecord, error) {
 		if err := binary.Read(r, binary.BigEndian, &payloadLen); err != nil {
 			return nil, err
 		}
-		if payloadLen == 0 || payloadLen > maxRecordPayloadLen {
+		if payloadLen == 0 || payloadLen > maxRecordPayloadLen || int64(payloadLen) > int64(r.Len()) {
 			return nil, fmt.Errorf("invalid record payload length %d", payloadLen)
 		}
 		blockBytes := make([]byte, int(payloadLen))

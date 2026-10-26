@@ -148,7 +148,7 @@ func TestHydrateReplacesCacheSymlinkWithoutOverwritingTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestKey := ManifestKey("archive", testChainID, DefaultManifest)
-	if saveErr := SaveManifest(ctx, store, manifestKey, manifest); saveErr != nil {
+	if saveErr := SaveManifest(ctx, store, manifestKey, &manifest); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	cacheDir := filepath.Join(t.TempDir(), "cache")
@@ -220,7 +220,7 @@ func TestHydrateEnforcesCacheLimitIncrementally(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestKey := ManifestKey("archive", testChainID, DefaultManifest)
-	if saveErr := SaveManifest(ctx, store, manifestKey, manifest); saveErr != nil {
+	if saveErr := SaveManifest(ctx, store, manifestKey, &manifest); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 
@@ -279,7 +279,7 @@ func TestHydrateCacheLimitIgnoresUnmanagedFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestKey := ManifestKey("archive", testChainID, DefaultManifest)
-	if saveErr := SaveManifest(ctx, store, manifestKey, manifest); saveErr != nil {
+	if saveErr := SaveManifest(ctx, store, manifestKey, &manifest); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	cacheDir := filepath.Join(t.TempDir(), "cache")
@@ -425,7 +425,7 @@ func TestMigrationResumeReusesCompletedSegments(t *testing.T) {
 	}
 	state.NextHeight = 2
 	state.Segments = state.Segments[:1]
-	if saveErr := saveMigrationState(ctx, store, StateKey(opts.Prefix, opts.ChainID, opts.ManifestName), state); saveErr != nil {
+	if saveErr := saveMigrationState(ctx, store, StateKey(opts.Prefix, opts.ChainID, opts.ManifestName), &state); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	second, err := Migrate(ctx, reader, store, opts)
@@ -474,7 +474,8 @@ func TestMigrationResumesLegacyDefaultManifestState(t *testing.T) {
 	state.NextHeight = 2
 	state.Segments = state.Segments[:1]
 	legacyStateKey := legacyMigrationStateKey(opts.Prefix, opts.ChainID)
-	if saveErr := saveMigrationState(ctx, store, legacyStateKey, state); saveErr != nil {
+	state.revision, state.sourceKey = "", ""
+	if saveErr := saveMigrationState(ctx, store, legacyStateKey, &state); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	if removeErr := os.Remove(filepath.Join(objectRoot, filepath.FromSlash(stateKey))); removeErr != nil {
@@ -648,15 +649,15 @@ func TestSaveMigrationStateValidatesInputs(t *testing.T) {
 		EndHeight:   1,
 		NextHeight:  1,
 	}
-	if err := saveMigrationState(ctx, store, "../escape", valid); err == nil || !strings.Contains(err.Error(), "migration state key") {
+	if err := saveMigrationState(ctx, store, "../escape", &valid); err == nil || !strings.Contains(err.Error(), "migration state key") {
 		t.Fatalf("saveMigrationState unsafe key err=%v", err)
 	}
-	if err := saveMigrationState(ctx, nil, StateKey("archive", testChainID, DefaultManifest), valid); err == nil || !strings.Contains(err.Error(), "object store is required") {
+	if err := saveMigrationState(ctx, nil, StateKey("archive", testChainID, DefaultManifest), &valid); err == nil || !strings.Contains(err.Error(), "object store is required") {
 		t.Fatalf("saveMigrationState nil store err=%v", err)
 	}
 	invalid := valid
 	invalid.NextHeight = 2
-	if err := saveMigrationState(ctx, store, StateKey("archive", testChainID, DefaultManifest), invalid); err == nil || !strings.Contains(err.Error(), "requires completed segments") {
+	if err := saveMigrationState(ctx, store, StateKey("archive", testChainID, DefaultManifest), &invalid); err == nil || !strings.Contains(err.Error(), "requires completed segments") {
 		t.Fatalf("saveMigrationState invalid state err=%v", err)
 	}
 }
@@ -702,7 +703,7 @@ func TestMigrationResumeRejectsUndecodableCompletedSegment(t *testing.T) {
 		Prefix:        "archive",
 		Compression:   CompressionGzip,
 	}
-	if saveErr := saveMigrationState(ctx, store, StateKey(opts.Prefix, opts.ChainID, opts.ManifestName), state); saveErr != nil {
+	if saveErr := saveMigrationState(ctx, store, StateKey(opts.Prefix, opts.ChainID, opts.ManifestName), &state); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	_, err = Migrate(ctx, reader, store, opts)
@@ -857,7 +858,7 @@ func TestVerifyDetectsMissingAndCorruptObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestKey := ManifestKey("archive", testChainID, DefaultManifest)
-	if err := SaveManifest(ctx, store, manifestKey, manifest); err != nil {
+	if err := SaveManifest(ctx, store, manifestKey, &manifest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Verify(ctx, store, VerifyOptions{ManifestKey: manifestKey}); err == nil {
@@ -945,7 +946,7 @@ func TestVerifySampleEveryDecodesOnlySampledBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestKey := ManifestKey("archive", testChainID, DefaultManifest)
-	if saveErr := SaveManifest(ctx, store, manifestKey, manifest); saveErr != nil {
+	if saveErr := SaveManifest(ctx, store, manifestKey, &manifest); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	if _, verifyErr := Verify(ctx, store, VerifyOptions{ManifestKey: manifestKey}); verifyErr == nil {

@@ -36,7 +36,7 @@ func TestArchiveBlockSourceCachesManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestKey := archive.ManifestKey("archive", ingestTestChainID, archive.DefaultManifest)
-	if saveErr := archive.SaveManifest(ctx, localStore, manifestKey, manifest); saveErr != nil {
+	if saveErr := archive.SaveManifest(ctx, localStore, manifestKey, &manifest); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 
@@ -93,7 +93,7 @@ func TestArchiveBlockSourceCanDisableManifestCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifestKey := archive.ManifestKey("archive", ingestTestChainID, archive.DefaultManifest)
-	if saveErr := archive.SaveManifest(ctx, localStore, manifestKey, manifest); saveErr != nil {
+	if saveErr := archive.SaveManifest(ctx, localStore, manifestKey, &manifest); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 
@@ -190,9 +190,9 @@ type countingObjectStore struct {
 	manifestGets int
 }
 
-func (s *countingObjectStore) Get(ctx context.Context, key string) ([]byte, error) {
+func (s *countingObjectStore) GetVersioned(ctx context.Context, key string) ([]byte, string, error) {
 	if key == s.manifestKey {
 		s.manifestGets++
 	}
-	return s.ObjectStore.Get(ctx, key)
+	return s.ObjectStore.GetVersioned(ctx, key)
 }

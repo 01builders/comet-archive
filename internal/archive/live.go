@@ -68,6 +68,12 @@ func ArchiveReadyFromHead(ctx context.Context, reader BlockReader, store ObjectS
 		return result, nil
 	}
 	opts.ReadyHeight = head - safetyWindow
+	if bounded, ok := reader.(interface{ ArchiveHeightLimit() int64 }); ok {
+		opts.ReadyHeight = min(opts.ReadyHeight, bounded.ArchiveHeightLimit())
+		if opts.ReadyHeight <= 0 {
+			return result, nil
+		}
+	}
 	return ArchiveReady(ctx, reader, store, opts)
 }
 
@@ -122,6 +128,9 @@ func ArchiveReady(ctx context.Context, reader BlockReader, store ObjectStore, op
 		return LiveArchiveResult{}, errors.New("source blockstore is empty")
 	}
 	end := min(opts.ReadyHeight, sourceHeight)
+	if bounded, ok := reader.(interface{ ArchiveHeightLimit() int64 }); ok {
+		end = min(end, bounded.ArchiveHeightLimit())
+	}
 	result := LiveArchiveResult{ManifestKey: manifestKey}
 	if end < nextHeight {
 		result.Manifest = manifest
@@ -143,7 +152,7 @@ func ArchiveReady(ctx context.Context, reader BlockReader, store ObjectStore, op
 		if err := manifest.AppendSegmentInPlace(segment, time.Now().UTC()); err != nil {
 			return LiveArchiveResult{}, err
 		}
-		if err := SaveManifest(ctx, store, manifestKey, manifest); err != nil {
+		if err := SaveManifest(ctx, store, manifestKey, &manifest); err != nil {
 			return LiveArchiveResult{}, err
 		}
 		if uploaded {
