@@ -37,19 +37,21 @@ Segment object writes use create-if-absent semantics when the configured object
 store supports them, so immutable segment keys are not silently overwritten by
 concurrent or accidental uploads. Manifests and migration state remain mutable
 because they are the archive index and resumability checkpoints.
-Each archive namespace, defined by the object-store URL prefix, archive prefix,
-chain ID, and manifest name, is therefore a single-writer target. Running two
-live archive peers or migrations against the same manifest key can race on that
-mutable high-water mark even though the segment objects themselves remain
-immutable and checksum-addressed.
+Manifest and migration-state publication use compare-and-swap against the
+revision read at the start of the operation. Initial publication is create-only.
+S3 uses the exact GET ETag with `If-Match`, or `If-None-Match: *` for creation;
+local conditional writes use process-shared file locks and atomic replacement.
+A stale publisher fails without overwriting newer progress. One writer per
+namespace is still recommended to avoid contention. Live maintenance reloads
+on its next attempt; a failed migration can be rerun to resume safely.
 
 The implementation ships two object-store backends:
 
 - `file://` for tests, dry-runs, and local development
 - `s3://` for S3-compatible object storage using the AWS SDK credential chain
 
-The object-store interface is narrow: `Get`, `Put`, `Exists`, `Stat`, and
-`List`. The S3 backend maps those operations to `GetObject`, `PutObject`,
+The object-store interface includes `Get`, `Put`, `PutIfAbsent`,
+`GetVersioned`, `CompareAndSwap`, `Exists`, `Stat`, and `List`. The S3 backend maps those operations to `GetObject`, `PutObject`,
 `HeadObject`, and `ListObjectsV2`. Endpoint override and path-style addressing
 are available for MinIO and other S3-compatible services through store URL query
 parameters:
@@ -85,7 +87,7 @@ validates height continuity, recorded block hashes, object size, and SHA-256.
 
 ## Manifest Format
 
-The manifest is JSON and versioned. It records:
+The manifest is v1 JSON with inline segment and block indexes. It records:
 
 - archive format version
 - chain ID
@@ -99,9 +101,15 @@ The manifest is JSON and versioned. It records:
 - SHA-256 checksum
 - per-block height and hash index
 
-The manifest is the archive index. It is intentionally sufficient to verify the
-archive without consulting CometBFT core, while block decoding still uses
-CometBFT protobuf types.
+Cold readers cache the complete manifest and select the segment covering the
+requested height. Verification uses a single manifest snapshot. Migration
+resume state also stores segment and block indexes inline. Conditional writes
+preserve both JSON layouts.
+
+The manifest and its segment objects are sufficient to verify archive
+storage integrity without querying a node. Block decoding uses CometBFT
+protobuf types; consensus authentication depends on the configured validation
+mode.
 
 ## Migration Flow
 
@@ -412,8 +420,12 @@ to consensus. The archive blocksync system keeps running instead:
 
 The node advertises the contiguous range it can serve from hot storage plus the
 archive manifest. Hot blocks are served synchronously from the local blockstore.
-Cold blocks are served by loading the matching archive segment from object
-storage and decoding the requested height. Because the blocksync status message
+Cold blocks are served from a 64 MiB byte-accounted cache of decoded segment
+records. Concurrent requests for a segment share one load; at most four distinct
+segment loads run at once. Each
+peer has a 64-request burst allowance refilling at 32 cold requests per second;
+excess requests are dropped for retry. Malformed messages and invalid block
+responses disconnect the sender. Because the blocksync status message
 can only describe one `[base, height]` range, disjoint cold/hot coverage is not
 merged into a misleading advertised range.
 
@@ -425,7 +437,11 @@ Validation policy is explicit:
   the pending block hash and part-set header
 - checkpoint validation can pin trusted block hashes at selected heights through
   `serve --validation=checkpoint --checkpoint <height>:<hexhash>` and reject
-  divergent blocks during ingestion
+  divergent blocks during ingestion. Archiving is capped at the last matching
+  checkpoint reached through linked block headers, the persisted head, and the
+  safety window. Hot blocks above that checkpoint remain unauthenticated. A
+  restart restores the cap only after verifying a retained checkpoint and its
+  stored predecessors; if none remains, archiving waits for a new checkpoint
 - validator-set validation can pin protobuf-encoded trusted validator sets at
   selected heights through
   `serve --validation=validator-set --validator-set <height>:<validators.pb>`.

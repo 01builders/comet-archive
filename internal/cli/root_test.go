@@ -2012,7 +2012,19 @@ func createCLIBlockStoreFixture(t *testing.T, dir string, heights int) {
 }
 
 func makeCLITestBlock(height int64) *ctypes.Block {
-	block := ctypes.MakeBlock(height, []ctypes.Tx{ctypes.Tx(fmt.Sprintf("tx-%d", height))}, &ctypes.Commit{}, nil)
+	commit := &ctypes.Commit{}
+	if height > 1 {
+		previous := makeCLITestBlock(height - 1)
+		parts, err := previous.MakePartSet(ctypes.BlockPartSizeBytes)
+		if err != nil {
+			panic(err)
+		}
+		commit = &ctypes.Commit{Height: height - 1, BlockID: ctypes.BlockID{Hash: previous.Hash(), PartSetHeader: parts.Header()}, Signatures: []ctypes.CommitSig{{BlockIDFlag: ctypes.BlockIDFlagCommit, ValidatorAddress: testAddress(byte(height)), Timestamp: time.Unix(height, 0).UTC(), Signature: testBytes(0x66, 64)}}}
+	}
+	block := ctypes.MakeBlock(height, []ctypes.Tx{ctypes.Tx(fmt.Sprintf("tx-%d", height))}, commit, nil)
+	if height > 1 {
+		block.LastBlockID = commit.BlockID
+	}
 	block.ChainID = cliTestChainID
 	block.ProposerAddress = testAddress(byte(height))
 	block.ValidatorsHash = testBytes(0x11, 32)
@@ -2128,5 +2140,43 @@ func assertHotStoreAvailable(t *testing.T, ingestor *blocksyncarchive.HotIngesto
 		}
 	case <-time.After(time.Second):
 		t.Fatal("ingest blocked during verification")
+	}
+}
+
+func (s *transientPutStore) CompareAndSwap(ctx context.Context, key string, data []byte, revision string) (string, error) {
+	if s.failures.CompareAndSwap(1, 0) {
+		return "", errors.New("transient put failure")
+	}
+	return s.ObjectStore.CompareAndSwap(ctx, key, data, revision)
+}
+
+func TestSoakSamplesBaselineAndFinalWhenDurationExpiresImmediately(t *testing.T) {
+	var height atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/readyz" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			liveMetricP2PPeers:       1,
+			liveMetricPeerBestHeight: height.Add(1),
+			liveMetricArchiveErrors:  0,
+			liveMetricPruneErrors:    0,
+			liveMetricColdResponses:  0,
+			liveMetricColdErrors:     0,
+			liveMetricColdQueue:      0,
+			liveMetricColdQueueFull:  0,
+			liveMetricBuffered:       0,
+		}); err != nil {
+			t.Errorf("encode metrics: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	result, err := runSoakCheck(t.Context(), soakOptions{MetricsURL: server.URL, Duration: time.Nanosecond, Interval: time.Nanosecond, RequireHeadAdvance: true, MaxHeadLag: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Samples != 2 || result.LastPeerBestHeight <= result.FirstPeerBestHeight {
+		t.Fatalf("missing baseline/final sample: %+v", result)
 	}
 }

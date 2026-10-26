@@ -53,12 +53,13 @@ type HotIngestor struct {
 	// so the reactor's p2p Receive goroutine isn't blocked by SaveBlock/leveldb
 	// writes. Mutations to i.pending and i.fetchedSets only happen under the
 	// write lock; reads under the read lock observe a consistent snapshot.
-	mu             sync.RWMutex
-	store          *store.BlockStore
-	opts           IngestOptions
-	pending        *types.Block
-	fetchedSets    map[int64]*types.ValidatorSet
-	fetchedHeights []int64
+	mu              sync.RWMutex
+	store           *store.BlockStore
+	opts            IngestOptions
+	pending         *types.Block
+	fetchedSets     map[int64]*types.ValidatorSet
+	fetchedHeights  []int64
+	verifiedThrough int64
 }
 
 type HotBlockReader struct {
@@ -108,7 +109,32 @@ func NewHotIngestor(blockStore *store.BlockStore, opts IngestOptions) (*HotInges
 	if opts.SafetyWindow < 0 {
 		return nil, errors.New("safety window cannot be negative")
 	}
-	return &HotIngestor{store: blockStore, opts: opts}, nil
+	ingestor := &HotIngestor{store: blockStore, opts: opts}
+	// Recover authentication only from a matching checkpoint and its hash-linked
+	// predecessors. A restart must not promote an unverified persisted tail.
+	if opts.Validation == ValidationCheckpoint {
+		var checkpointHeight int64
+		for height := range opts.Checkpoints {
+			if height >= blockStore.Base() && height <= blockStore.Height() {
+				checkpointHeight = max(checkpointHeight, height)
+			}
+		}
+		if checkpointHeight > 0 {
+			block := blockStore.LoadBlock(checkpointHeight)
+			if block == nil || block.ChainID != opts.ChainID || strings.ToLower(hex.EncodeToString(block.Hash())) != opts.Checkpoints[checkpointHeight] {
+				return nil, fmt.Errorf("stored checkpoint hash mismatch at height %d", checkpointHeight)
+			}
+			for h := checkpointHeight; h > blockStore.Base(); h-- {
+				previous := blockStore.LoadBlock(h - 1)
+				if previous == nil || previous.ChainID != opts.ChainID || block.LastCommit == nil || !bytes.Equal(block.LastCommitHash, block.LastCommit.Hash()) || !bytes.Equal(block.LastBlockID.Hash, previous.Hash()) || !block.LastBlockID.Equals(block.LastCommit.BlockID) {
+					return nil, fmt.Errorf("checkpoint chain is broken at height %d", h)
+				}
+				block = previous
+			}
+			ingestor.verifiedThrough = checkpointHeight
+		}
+	}
+	return ingestor, nil
 }
 
 func (i *HotIngestor) NextHeight() int64 {
@@ -176,6 +202,16 @@ func (*HotBlockReader) Close() error {
 	return nil
 }
 
+// ArchiveHeightLimit bounds publication; zero means no authenticated blocks.
+func (r *HotBlockReader) ArchiveHeightLimit() int64 {
+	r.ingestor.mu.RLock()
+	defer r.ingestor.mu.RUnlock()
+	if r.ingestor.opts.Validation == ValidationCheckpoint {
+		return r.ingestor.verifiedThrough
+	}
+	return r.ingestor.store.Height()
+}
+
 func (i *HotIngestor) Submit(block *types.Block) (IngestResult, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -188,7 +224,13 @@ func (i *HotIngestor) Submit(block *types.Block) (IngestResult, error) {
 	}
 	result := IngestResult{Accepted: block.Height}
 	if i.pending == nil {
+		if previous := i.store.LoadBlock(i.store.Height()); previous != nil {
+			if block.LastCommit == nil || !bytes.Equal(block.LastCommit.BlockID.Hash, previous.Hash()) {
+				return IngestResult{}, errors.New("block does not extend persisted head")
+			}
+		}
 		i.pending = block
+		i.markCheckpoint(block)
 		return i.withStoreState(result), nil
 	}
 	if err := i.persistPending(block); err != nil {
@@ -196,7 +238,16 @@ func (i *HotIngestor) Submit(block *types.Block) (IngestResult, error) {
 	}
 	result.Persisted = i.pending.Height
 	i.pending = block
+	i.markCheckpoint(block)
 	return i.withStoreState(result), nil
+}
+
+func (i *HotIngestor) markCheckpoint(block *types.Block) {
+	if i.opts.Validation == ValidationCheckpoint {
+		if _, ok := i.opts.Checkpoints[block.Height]; ok {
+			i.verifiedThrough = block.Height
+		}
+	}
 }
 
 func (i *HotIngestor) PendingHeight() int64 {
@@ -220,6 +271,12 @@ func (i *HotIngestor) validateBlock(block *types.Block) error {
 	}
 	if len(block.Hash()) == 0 {
 		return fmt.Errorf("block %d has empty hash", block.Height)
+	}
+	if block.LastCommit != nil && block.Height > 1 && !block.LastBlockID.Equals(block.LastCommit.BlockID) {
+		return fmt.Errorf("block %d last block ID does not match last commit", block.Height)
+	}
+	if block.LastCommit == nil || !bytes.Equal(block.LastCommitHash, block.LastCommit.Hash()) {
+		return fmt.Errorf("block %d last commit hash mismatch", block.Height)
 	}
 	if i.opts.Validation == ValidationCheckpoint {
 		if want, ok := i.opts.Checkpoints[block.Height]; ok {
@@ -360,5 +417,9 @@ func (i *HotIngestor) readyToArchiveThrough() int64 {
 	if height <= i.opts.SafetyWindow {
 		return 0
 	}
-	return height - i.opts.SafetyWindow
+	ready := height - i.opts.SafetyWindow
+	if i.opts.Validation == ValidationCheckpoint {
+		ready = min(ready, i.verifiedThrough)
+	}
+	return ready
 }

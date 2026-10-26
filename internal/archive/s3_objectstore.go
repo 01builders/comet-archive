@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -24,7 +25,7 @@ import (
 // against a hostile or misconfigured backend returning unexpectedly large
 // payloads. Manifests and segments are validated against expected sizes by
 // their callers; this cap is a backstop.
-const maxS3ObjectBytes = 8 << 30
+const maxS3ObjectBytes = MaxSegmentPayloadBytes + (1 << 20)
 
 type S3ObjectStore struct {
 	client *s3.Client
@@ -139,31 +140,36 @@ func validateS3Endpoint(endpoint string) error {
 }
 
 func (s *S3ObjectStore) Get(ctx context.Context, key string) ([]byte, error) {
+	data, _, err := s.GetVersioned(ctx, key)
+	return data, err
+}
+
+func (s *S3ObjectStore) GetVersioned(ctx context.Context, key string) ([]byte, string, error) {
 	if err := ValidateObjectKey(key); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(s.fullKey(key)),
 	})
 	if isS3NotFound(err) {
-		return nil, ErrObjectNotFound
+		return nil, "", ErrObjectNotFound
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer out.Body.Close()
 	if size := aws.ToInt64(out.ContentLength); size > maxS3ObjectBytes {
-		return nil, fmt.Errorf("object %q size %d exceeds max %d", key, size, maxS3ObjectBytes)
+		return nil, "", fmt.Errorf("object %q size %d exceeds max %d", key, size, maxS3ObjectBytes)
 	}
 	data, err := io.ReadAll(io.LimitReader(out.Body, maxS3ObjectBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if int64(len(data)) > maxS3ObjectBytes {
-		return nil, fmt.Errorf("object %q exceeds max read size %d", key, maxS3ObjectBytes)
+		return nil, "", fmt.Errorf("object %q exceeds max read size %d", key, maxS3ObjectBytes)
 	}
-	return data, nil
+	return data, aws.ToString(out.ETag), nil
 }
 
 func (s *S3ObjectStore) Put(ctx context.Context, key string, data []byte) error {
@@ -195,19 +201,11 @@ func (s *S3ObjectStore) PutIfAbsentReturningETag(ctx context.Context, key string
 	if err := ValidateObjectKey(key); err != nil {
 		return "", err
 	}
-	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(s.bucket),
-		Key:         aws.String(s.fullKey(key)),
-		Body:        bytes.NewReader(data),
-		IfNoneMatch: aws.String("*"),
-	})
-	if isS3AlreadyExists(err) {
+	etag, err := s.CompareAndSwap(ctx, key, data, "")
+	if errors.Is(err, ErrObjectConflict) {
 		return "", ErrObjectAlreadyExists
 	}
-	if err != nil {
-		return "", err
-	}
-	return normalizeETag(aws.ToString(out.ETag)), nil
+	return normalizeETag(etag), err
 }
 
 // normalizeETag strips the surrounding quotes that S3 includes in ETag
@@ -346,4 +344,41 @@ func isS3AlreadyExists(err error) bool {
 	}
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && (apiErr.ErrorCode() == "PreconditionFailed" || apiErr.ErrorCode() == "412")
+}
+
+// Preserve the exact ETag from GET, including case and quotes.
+func (s *S3ObjectStore) CompareAndSwap(ctx context.Context, key string, data []byte, revision string) (string, error) {
+	if err := ValidateObjectKey(key); err != nil {
+		return "", err
+	}
+	input := &s3.PutObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(s.fullKey(key)), Body: bytes.NewReader(data)}
+	if revision == "" {
+		input.IfNoneMatch = aws.String("*")
+	} else {
+		input.IfMatch = aws.String(revision)
+	}
+	for attempt := 0; ; attempt++ {
+		input.Body = bytes.NewReader(data)
+		out, err := s.client.PutObject(ctx, input)
+		if err == nil {
+			if aws.ToString(out.ETag) == "" {
+				return "", errors.New("conditional write returned no ETag")
+			}
+			return aws.ToString(out.ETag), nil
+		}
+		if isS3AlreadyExists(err) {
+			return "", ErrObjectConflict
+		}
+		var apiErr smithy.APIError
+		if !errors.As(err, &apiErr) || (apiErr.ErrorCode() != "ConditionalRequestConflict" && apiErr.ErrorCode() != "409") || attempt >= 2 {
+			return "", err
+		}
+		timer := time.NewTimer(time.Duration(attempt+1) * 50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
 }

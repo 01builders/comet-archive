@@ -1,7 +1,9 @@
 package blocksyncarchive
 
 import (
+	"container/list"
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"sync"
@@ -25,9 +27,16 @@ type ArchiveBlockSource struct {
 	manifestKey      string
 	manifestCacheTTL time.Duration
 
-	mu               sync.Mutex
-	cachedManifest   archive.Manifest
-	cachedManifestAt time.Time
+	mu                sync.Mutex
+	cachedManifest    archive.Manifest
+	cachedManifestAt  time.Time
+	manifestFlight    *manifestLoad
+	segments          map[string]*list.Element
+	segmentLRU        list.List
+	segmentBytes      int
+	segmentCacheLimit int
+	flights           map[string]*segmentLoad
+	fetchSlots        chan struct{}
 }
 
 func NewArchiveBlockSource(store archive.ObjectStore, manifestKey string) (*ArchiveBlockSource, error) {
@@ -41,9 +50,13 @@ func NewArchiveBlockSource(store archive.ObjectStore, manifestKey string) (*Arch
 		return nil, err
 	}
 	return &ArchiveBlockSource{
-		store:            store,
-		manifestKey:      manifestKey,
-		manifestCacheTTL: DefaultColdManifestCacheTTL,
+		store:             store,
+		manifestKey:       manifestKey,
+		manifestCacheTTL:  DefaultColdManifestCacheTTL,
+		segments:          make(map[string]*list.Element),
+		segmentCacheLimit: coldSegmentCacheBytes,
+		flights:           make(map[string]*segmentLoad),
+		fetchSlots:        make(chan struct{}, 4),
 	}, nil
 }
 
@@ -89,39 +102,146 @@ func (s *ArchiveBlockSource) LoadBlock(ctx context.Context, height int64) (*type
 	if !ok {
 		return nil, ErrColdBlockNotFound
 	}
-	data, err := s.store.Get(ctx, segment.Key)
+	records, err := s.loadSegment(ctx, segment)
 	if err != nil {
 		return nil, err
 	}
-	block, err := archive.DecodeSegmentBlock(data, segment, height)
-	if errors.Is(err, archive.ErrSegmentBlockNotFound) {
+	index := height - segment.FirstHeight
+	if index < 0 || index >= int64(len(records)) {
 		return nil, ErrColdBlockNotFound
 	}
+	return archive.RecordToBlock(records[index])
+}
+
+type manifestLoad struct {
+	done     chan struct{}
+	manifest archive.Manifest
+	err      error
+}
+
+type segmentLoad struct {
+	done    chan struct{}
+	records []archive.BlockRecord
+	err     error
+}
+
+type cachedSegment struct {
+	key     string
+	records []archive.BlockRecord
+	bytes   int
+}
+
+const coldSegmentCacheBytes = 64 << 20
+
+func (s *ArchiveBlockSource) loadSegment(ctx context.Context, segment archive.SegmentManifest) ([]archive.BlockRecord, error) {
+	// Include every descriptor field: a refreshed manifest must never reuse a
+	// cached segment under changed checksums, ranges, or block indexes.
+	descriptor, err := json.Marshal(segment)
 	if err != nil {
 		return nil, err
 	}
-	return block, nil
+	key := string(descriptor)
+acquire:
+	for {
+		s.mu.Lock()
+		if entry := s.segments[key]; entry != nil {
+			s.segmentLRU.MoveToFront(entry)
+			cached, ok := entry.Value.(cachedSegment)
+			if !ok {
+				panic("invalid segment cache entry")
+			}
+			records := cached.records
+			s.mu.Unlock()
+			return records, nil
+		}
+		if flight := s.flights[key]; flight != nil {
+			s.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-flight.done:
+				return flight.records, flight.err
+			}
+		}
+		// Bound distinct in-flight segment loads as well as retained cache memory.
+		select {
+		case s.fetchSlots <- struct{}{}:
+			break acquire
+		default:
+			s.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case s.fetchSlots <- struct{}{}:
+			}
+			<-s.fetchSlots
+			continue
+		}
+	}
+	flight := &segmentLoad{done: make(chan struct{})}
+	s.flights[key] = flight
+	s.mu.Unlock()
+	data, err := s.store.Get(ctx, segment.Key)
+	var records []archive.BlockRecord
+	if err == nil {
+		records, err = archive.DecodeSegment(data, segment)
+	}
+	size := len(key)
+	for _, record := range records {
+		size += len(record.Bytes) + len(record.Hash) + 64
+	}
+	s.mu.Lock()
+	if err == nil && size <= s.segmentCacheLimit {
+		for s.segmentBytes+size > s.segmentCacheLimit {
+			entry := s.segmentLRU.Back()
+			cached, ok := entry.Value.(cachedSegment)
+			if !ok {
+				panic("invalid segment cache entry")
+			}
+			delete(s.segments, cached.key)
+			s.segmentBytes -= cached.bytes
+			s.segmentLRU.Remove(entry)
+		}
+		s.segments[key] = s.segmentLRU.PushFront(cachedSegment{key: key, records: records, bytes: size})
+		s.segmentBytes += size
+	}
+	flight.records, flight.err = records, err
+	delete(s.flights, key)
+	close(flight.done)
+	s.mu.Unlock()
+	<-s.fetchSlots
+	return records, err
 }
 
 func (s *ArchiveBlockSource) loadManifest(ctx context.Context) (archive.Manifest, error) {
-	now := time.Now()
 	s.mu.Lock()
-	if !s.cachedManifestAt.IsZero() && s.manifestCacheTTL > 0 && now.Sub(s.cachedManifestAt) < s.manifestCacheTTL {
+	if !s.cachedManifestAt.IsZero() && s.manifestCacheTTL > 0 && time.Since(s.cachedManifestAt) < s.manifestCacheTTL {
 		manifest := s.cachedManifest
 		s.mu.Unlock()
 		return manifest, nil
 	}
-	s.mu.Unlock()
-
-	manifest, err := archive.LoadManifest(ctx, s.store, s.manifestKey)
-	if err != nil {
-		return archive.Manifest{}, err
+	if flight := s.manifestFlight; flight != nil {
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return archive.Manifest{}, ctx.Err()
+		case <-flight.done:
+			return flight.manifest, flight.err
+		}
 	}
-	s.mu.Lock()
-	s.cachedManifest = manifest
-	s.cachedManifestAt = now
+	flight := &manifestLoad{done: make(chan struct{})}
+	s.manifestFlight = flight
 	s.mu.Unlock()
-	return manifest, nil
+	manifest, err := archive.LoadManifest(ctx, s.store, s.manifestKey)
+	s.mu.Lock()
+	if err == nil {
+		s.cachedManifest, s.cachedManifestAt = manifest, time.Now()
+	}
+	flight.manifest, flight.err = manifest, err
+	s.manifestFlight = nil
+	close(flight.done)
+	s.mu.Unlock()
+	return manifest, err
 }
 
 func segmentForHeight(segments []archive.SegmentManifest, height int64) (archive.SegmentManifest, bool) {

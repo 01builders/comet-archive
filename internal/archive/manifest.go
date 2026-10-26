@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -20,6 +21,8 @@ const (
 )
 
 type Manifest struct {
+	revision    string
+	sourceKey   string
 	Version     int               `json:"version"`
 	ChainID     string            `json:"chain_id"`
 	FirstHeight int64             `json:"first_height"`
@@ -113,23 +116,35 @@ func LoadManifest(ctx context.Context, store ObjectStore, key string) (Manifest,
 	if store == nil {
 		return Manifest{}, errors.New("object store is required")
 	}
-	data, err := store.Get(ctx, key)
+	data, revision, err := store.GetVersioned(ctx, key)
 	if err != nil {
 		return Manifest{}, err
+	}
+	if len(data) > maxManifestBytes {
+		return Manifest{}, errors.New("manifest exceeds size limit")
 	}
 	var manifest Manifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return Manifest{}, err
 	}
+	manifest.revision, manifest.sourceKey = revision, key
 	return manifest, manifest.Validate()
 }
 
-func SaveManifest(ctx context.Context, store ObjectStore, key string, manifest Manifest) error {
+// SaveManifest publishes against the revision that was loaded. A new manifest
+// can only create a missing key. On conflict callers must reload and recompute.
+func SaveManifest(ctx context.Context, store ObjectStore, key string, manifest *Manifest) error {
 	if err := ValidateObjectKey(key); err != nil {
 		return fmt.Errorf("manifest key: %w", err)
 	}
 	if store == nil {
 		return errors.New("object store is required")
+	}
+	if manifest == nil {
+		return errors.New("manifest is nil")
+	}
+	if manifest.sourceKey != "" && manifest.sourceKey != key {
+		return errors.New("manifest revision belongs to another key")
 	}
 	if err := manifest.Validate(); err != nil {
 		return err
@@ -139,7 +154,15 @@ func SaveManifest(ctx context.Context, store ObjectStore, key string, manifest M
 		return err
 	}
 	data = append(data, '\n')
-	return store.Put(ctx, key, data)
+	if len(data) > maxManifestBytes {
+		return errors.New("manifest exceeds size limit")
+	}
+	revision, err := store.CompareAndSwap(ctx, key, data, manifest.revision)
+	if err != nil {
+		return fmt.Errorf("publish manifest %s: %w", key, err)
+	}
+	manifest.revision, manifest.sourceKey = revision, key
+	return nil
 }
 
 func (m Manifest) Validate() error {
@@ -205,7 +228,7 @@ func (s SegmentManifest) Validate() error {
 	if err := ValidateObjectKey(s.Key); err != nil {
 		return err
 	}
-	if s.FirstHeight <= 0 || s.LastHeight < s.FirstHeight {
+	if s.FirstHeight <= 0 || s.LastHeight < s.FirstHeight || s.LastHeight == math.MaxInt64 {
 		return fmt.Errorf("invalid height range %d-%d", s.FirstHeight, s.LastHeight)
 	}
 	if s.Compression == "" {
@@ -222,6 +245,9 @@ func (s SegmentManifest) Validate() error {
 	}
 	if _, err := hex.DecodeString(s.SHA256); err != nil {
 		return fmt.Errorf("sha256 is not valid hex: %w", err)
+	}
+	if s.LastHeight-s.FirstHeight >= MaxSegmentBlocks {
+		return errors.New("segment block count exceeds maximum")
 	}
 	if got, want := len(s.Blocks), int(s.LastHeight-s.FirstHeight+1); got != want {
 		return fmt.Errorf("block index length %d, expected %d", got, want)
@@ -240,3 +266,6 @@ func (s SegmentManifest) Validate() error {
 	}
 	return nil
 }
+
+// Metadata uses the same bounded read limit as other archive objects.
+const maxManifestBytes = maxS3ObjectBytes

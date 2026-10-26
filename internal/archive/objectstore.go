@@ -15,6 +15,7 @@ import (
 )
 
 var (
+	ErrObjectConflict      = errors.New("object changed concurrently")
 	ErrObjectNotFound      = errors.New("object not found")
 	ErrObjectAlreadyExists = errors.New("object already exists")
 )
@@ -25,6 +26,10 @@ type ObjectInfo struct {
 }
 
 type ObjectStore interface {
+	PutIfAbsent(ctx context.Context, key string, data []byte) error
+	// An empty revision in CompareAndSwap means create only. Revisions are opaque.
+	GetVersioned(ctx context.Context, key string) ([]byte, string, error)
+	CompareAndSwap(ctx context.Context, key string, data []byte, revision string) (string, error)
 	Get(ctx context.Context, key string) ([]byte, error)
 	Put(ctx context.Context, key string, data []byte) error
 	Exists(ctx context.Context, key string) (bool, error)
@@ -90,8 +95,20 @@ type readOnlyObjectStore struct {
 	store ObjectStore
 }
 
+func (s readOnlyObjectStore) GetVersioned(ctx context.Context, key string) ([]byte, string, error) {
+	return s.store.GetVersioned(ctx, key)
+}
+
+func (readOnlyObjectStore) CompareAndSwap(context.Context, string, []byte, string) (string, error) {
+	return "", errors.New("object store is read-only")
+}
+
 func (s readOnlyObjectStore) Get(ctx context.Context, key string) ([]byte, error) {
 	return s.store.Get(ctx, key)
+}
+
+func (readOnlyObjectStore) PutIfAbsent(context.Context, string, []byte) error {
+	return errors.New("object store is read-only")
 }
 
 func (readOnlyObjectStore) Put(context.Context, string, []byte) error {
@@ -196,11 +213,29 @@ func (s *LocalObjectStore) Get(_ context.Context, key string) ([]byte, error) {
 	if symlinkErr := rejectLocalObjectSymlink(s.root, path); symlinkErr != nil {
 		return nil, symlinkErr
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrObjectNotFound
 	}
-	return data, err
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxS3ObjectBytes {
+		return nil, errors.New("object exceeds maximum read size")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxS3ObjectBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxS3ObjectBytes {
+		return nil, errors.New("object exceeds maximum read size")
+	}
+	return data, nil
 }
 
 func (s *LocalObjectStore) Put(_ context.Context, key string, data []byte) error {
@@ -374,6 +409,9 @@ func (s *LocalObjectStore) List(_ context.Context, prefix string) ([]ObjectInfo,
 			return err
 		}
 		if d.IsDir() {
+			if d.Name() == ".cas-locks" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if d.Type()&os.ModeSymlink != 0 {

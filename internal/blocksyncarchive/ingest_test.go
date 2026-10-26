@@ -322,6 +322,9 @@ func makeSignedIngestBlock(t *testing.T, height int64, vals *types.ValidatorSet,
 		lastCommit = &types.Commit{Height: 0, Signatures: []types.CommitSig{}}
 	}
 	block := types.MakeBlock(height, []types.Tx{types.Tx(fmt.Sprintf("tx-%d", height))}, lastCommit, nil)
+	if height > 1 {
+		block.LastBlockID = lastCommit.BlockID
+	}
 	block.ChainID = ingestTestChainID
 	block.ProposerAddress = vals.GetProposer().Address
 	block.ValidatorsHash = vals.Hash()
@@ -394,6 +397,9 @@ func makeIngestBlock(t *testing.T, height int64) *types.Block {
 		lastCommit = &types.Commit{Height: 0, Signatures: []types.CommitSig{}}
 	}
 	block := types.MakeBlock(height, []types.Tx{types.Tx(fmt.Sprintf("tx-%d", height))}, lastCommit, nil)
+	if height > 1 {
+		block.LastBlockID = lastCommit.BlockID
+	}
 	block.ChainID = ingestTestChainID
 	block.ProposerAddress = bytesOf(byte(height), crypto.AddressSize)
 	block.ValidatorsHash = bytesOf(0x11, 32)

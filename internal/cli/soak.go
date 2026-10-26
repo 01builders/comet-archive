@@ -127,7 +127,9 @@ func runSoakCheck(ctx context.Context, opts soakOptions) (soakResult, error) {
 				result.MaxHeadLag = headLag
 			}
 		}
-		if !time.Now().Before(deadline) {
+		// Deltas and head advancement require a baseline and a final sample,
+		// even when the first HTTP round trip consumes the requested duration.
+		if result.Samples >= 2 && !time.Now().Before(deadline) {
 			break
 		}
 		sleep := opts.Interval

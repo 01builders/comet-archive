@@ -221,13 +221,13 @@ func TestArchiveAPIsRejectNilDependencies(t *testing.T) {
 	if _, err := LoadManifest(ctx, nil, "../escape"); err == nil || !strings.Contains(err.Error(), "manifest key") {
 		t.Fatalf("LoadManifest err=%v, want manifest key validation", err)
 	}
-	if err := SaveManifest(ctx, nil, "../escape", Manifest{}); err == nil || !strings.Contains(err.Error(), "manifest key") {
+	if err := SaveManifest(ctx, nil, "../escape", &Manifest{}); err == nil || !strings.Contains(err.Error(), "manifest key") {
 		t.Fatalf("SaveManifest err=%v, want manifest key validation", err)
 	}
 	if _, err := LoadManifest(ctx, nil, manifestKey); err == nil || !strings.Contains(err.Error(), "object store is required") {
 		t.Fatalf("LoadManifest err=%v, want object store required", err)
 	}
-	if err := SaveManifest(ctx, nil, manifestKey, Manifest{}); err == nil || !strings.Contains(err.Error(), "object store is required") {
+	if err := SaveManifest(ctx, nil, manifestKey, &Manifest{}); err == nil || !strings.Contains(err.Error(), "object store is required") {
 		t.Fatalf("SaveManifest err=%v, want object store required", err)
 	}
 	if _, err := Verify(ctx, nil, VerifyOptions{ManifestKey: manifestKey}); err == nil || !strings.Contains(err.Error(), "object store is required") {

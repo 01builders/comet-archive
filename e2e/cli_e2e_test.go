@@ -684,6 +684,9 @@ func makeE2EBlock(t *testing.T, height int64) *ctypes.Block {
 		lastCommit = &ctypes.Commit{Height: 0, Signatures: []ctypes.CommitSig{}}
 	}
 	block := ctypes.MakeBlock(height, []ctypes.Tx{ctypes.Tx(fmt.Sprintf("tx-%d", height))}, lastCommit, nil)
+	if height > 1 {
+		block.LastBlockID = lastCommit.BlockID
+	}
 	block.ChainID = e2eChainID
 	block.ProposerAddress = e2eBytes(byte(height), crypto.AddressSize)
 	block.ValidatorsHash = e2eBytes(0x11, 32)

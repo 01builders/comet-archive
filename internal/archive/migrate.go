@@ -36,6 +36,8 @@ type MigrationResult struct {
 }
 
 type MigrationState struct {
+	revision      string
+	sourceKey     string
 	ChainID       string            `json:"chain_id"`
 	StartHeight   int64             `json:"start_height"`
 	EndHeight     int64             `json:"end_height"`
@@ -78,8 +80,14 @@ func Migrate(ctx context.Context, reader BlockReader, store ObjectStore, opts Mi
 	if err != nil {
 		return MigrationResult{}, err
 	}
-	if validateErr := validateExistingMigrationManifest(ctx, store, manifestKey, opts.ChainID, start, end); validateErr != nil {
-		return MigrationResult{}, validateErr
+	existing, err := LoadManifest(ctx, store, manifestKey)
+	if err != nil && !errors.Is(err, ErrObjectNotFound) {
+		return MigrationResult{}, err
+	}
+	if err == nil {
+		if existing.ChainID != opts.ChainID || (existing.LastHeight != 0 && (existing.FirstHeight != start || existing.LastHeight != end)) {
+			return MigrationResult{}, fmt.Errorf("existing manifest is for %s %d-%d, requested %d-%d for %s", existing.ChainID, existing.FirstHeight, existing.LastHeight, start, end, opts.ChainID)
+		}
 	}
 	state, foundState, err := loadMigrationStateWithFound(ctx, store, stateKey)
 	if err != nil {
@@ -95,6 +103,7 @@ func Migrate(ctx context.Context, reader BlockReader, store ObjectStore, opts Mi
 			}
 			if foundLegacyState {
 				state = legacyState
+				state.revision, state.sourceKey = "", ""
 				loadedLegacyState = true
 			}
 		}
@@ -111,7 +120,7 @@ func Migrate(ctx context.Context, reader BlockReader, store ObjectStore, opts Mi
 			state.ChainID, state.StartHeight, state.EndHeight, opts.ChainID, start, end)
 	}
 	if loadedLegacyState {
-		if saveErr := saveMigrationState(ctx, store, stateKey, state); saveErr != nil {
+		if saveErr := saveMigrationState(ctx, store, stateKey, &state); saveErr != nil {
 			return MigrationResult{}, saveErr
 		}
 	}
@@ -134,7 +143,7 @@ func Migrate(ctx context.Context, reader BlockReader, store ObjectStore, opts Mi
 		state.Segments = appendSegment(state.Segments, segment)
 		state.NextHeight = last + 1
 		state.LastUpdatedAt = time.Now().UTC()
-		if saveErr := saveMigrationState(ctx, store, stateKey, state); saveErr != nil {
+		if saveErr := saveMigrationState(ctx, store, stateKey, &state); saveErr != nil {
 			return MigrationResult{}, saveErr
 		}
 		height = last + 1
@@ -146,33 +155,14 @@ func Migrate(ctx context.Context, reader BlockReader, store ObjectStore, opts Mi
 	if err != nil {
 		return MigrationResult{}, err
 	}
-	if err := SaveManifest(ctx, store, manifestKey, manifest); err != nil {
+	manifest.revision, manifest.sourceKey = existing.revision, existing.sourceKey
+	if err := SaveManifest(ctx, store, manifestKey, &manifest); err != nil {
 		return MigrationResult{}, err
 	}
 	result.Manifest = manifest
 	result.ManifestKey = manifestKey
 	result.Segments = len(manifest.Segments)
 	return result, nil
-}
-
-func validateExistingMigrationManifest(ctx context.Context, store ObjectStore, key, chainID string, start, end int64) error {
-	manifest, err := LoadManifest(ctx, store, key)
-	if errors.Is(err, ErrObjectNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if manifest.ChainID != chainID {
-		return fmt.Errorf("existing manifest %s is for chain %q, requested %q", key, manifest.ChainID, chainID)
-	}
-	if manifest.LastHeight == 0 {
-		return nil
-	}
-	if manifest.FirstHeight != start || manifest.LastHeight != end {
-		return fmt.Errorf("existing manifest %s is for range %d-%d, requested %d-%d", key, manifest.FirstHeight, manifest.LastHeight, start, end)
-	}
-	return nil
 }
 
 func verifyCompletedMigrationSegments(ctx context.Context, store ObjectStore, segments []SegmentManifest, concurrency int) error {
@@ -282,12 +272,15 @@ func loadMigrationState(ctx context.Context, store ObjectStore, key string) (Mig
 }
 
 func loadMigrationStateWithFound(ctx context.Context, store ObjectStore, key string) (MigrationState, bool, error) {
-	data, err := store.Get(ctx, key)
+	data, revision, err := store.GetVersioned(ctx, key)
 	if errors.Is(err, ErrObjectNotFound) {
 		return MigrationState{}, false, nil
 	}
 	if err != nil {
 		return MigrationState{}, false, err
+	}
+	if len(data) > maxManifestBytes {
+		return MigrationState{}, false, errors.New("migration state exceeds size limit")
 	}
 	var state MigrationState
 	if err := json.Unmarshal(data, &state); err != nil {
@@ -296,6 +289,7 @@ func loadMigrationStateWithFound(ctx context.Context, store ObjectStore, key str
 	if err := validateMigrationState(state); err != nil {
 		return MigrationState{}, false, fmt.Errorf("invalid migration state %s: %w", key, err)
 	}
+	state.revision, state.sourceKey = revision, key
 	return state, true, nil
 }
 
@@ -339,14 +333,20 @@ func validateMigrationState(state MigrationState) error {
 	return nil
 }
 
-func saveMigrationState(ctx context.Context, store ObjectStore, key string, state MigrationState) error {
+func saveMigrationState(ctx context.Context, store ObjectStore, key string, state *MigrationState) error {
 	if err := ValidateObjectKey(key); err != nil {
 		return fmt.Errorf("migration state key: %w", err)
 	}
 	if store == nil {
 		return errors.New("object store is required")
 	}
-	if err := validateMigrationState(state); err != nil {
+	if state == nil {
+		return errors.New("migration state is nil")
+	}
+	if state.sourceKey != "" && state.sourceKey != key {
+		return errors.New("migration state revision belongs to another key")
+	}
+	if err := validateMigrationState(*state); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -354,5 +354,13 @@ func saveMigrationState(ctx context.Context, store ObjectStore, key string, stat
 		return err
 	}
 	data = append(bytes.TrimSpace(data), '\n')
-	return store.Put(ctx, key, data)
+	if len(data) > maxManifestBytes {
+		return errors.New("migration state exceeds size limit")
+	}
+	revision, err := store.CompareAndSwap(ctx, key, data, state.revision)
+	if err != nil {
+		return err
+	}
+	state.revision, state.sourceKey = revision, key
+	return nil
 }
