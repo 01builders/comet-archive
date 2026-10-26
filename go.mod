@@ -9,7 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.10
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.5
 	github.com/aws/smithy-go v1.28.6
-	github.com/cometbft/cometbft v0.0.0
+	github.com/cometbft/cometbft v0.39.0-rc1.0.20260507140103-3b0311fc6a8c
 	github.com/cometbft/cometbft-db v0.14.1
 	github.com/cosmos/gogoproto v1.7.2
 	github.com/spf13/cobra v1.10.2
@@ -169,5 +169,3 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
-
-replace github.com/cometbft/cometbft => ../cometbft
