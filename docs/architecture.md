@@ -147,14 +147,18 @@ a fixed final end height.
 `cometbft-archive prune-hot` enforces bounded local hot storage after archive
 verification. It first runs a full archive verification for the selected
 manifest. Only after the verifier confirms segment checksums, object sizes,
-decoding, heights, and hashes does it compute a prune height from:
+decoding, heights, and hashes does it compute a prune height from the verified
+manifest snapshot and the hot head:
 
 - the archive high-water mark, `manifest.LastHeight + 1`
 - the configured local retention window, `head - retain_blocks + 1`
 
 The command prunes to the lower of those two heights and delegates the actual
-deletion to CometBFT's `BlockStore.PruneBlocks` API. It does not delete
-blockstore keys directly. Evidence retention parameters may be overridden for
+deletion to CometBFT's `BlockStore.PruneBlocks` API. Before deletion, it requires
+the archive chain ID to match the hot head and the archived block hash at
+`pruneTo - 1` to match the hot block. The archive must cover the full hot range
+being deleted. Missing coverage or a mismatch fails closed. The command does not
+delete blockstore keys directly. Evidence retention parameters may be overridden for
 archive deployments, but the default path keeps CometBFT's default evidence
 retention semantics.
 
@@ -162,8 +166,12 @@ retention semantics.
 maintenance loop when `--prune-interval` is greater than zero. Maintenance
 serializes archive upload and pruning for the local hot blockstore: it archives
 ready blocks first, skips pruning for an empty or missing manifest, verifies the
-archive before each prune attempt, and retains the latest `--retain-blocks`
-local blocks subject to CometBFT evidence retention.
+manifest on every prune attempt and only downloads and fully verifies new or
+changed segment descriptors. The in-memory verification cache lasts for the
+maintenance loop and relies on immutable archive objects. Verification runs
+without the ingestor write lock; only the hot-store safety reads and pruning
+hold that lock. The loop retains the latest `--retain-blocks` local blocks
+subject to CometBFT evidence retention.
 In the live peer, transient archive or prune errors do not stop P2P syncing or
 hot block serving. The maintenance loop records the failure in metrics and
 retries on the next interval. A failed archive upload prevents that interval's

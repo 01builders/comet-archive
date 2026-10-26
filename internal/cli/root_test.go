@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2033,4 +2034,99 @@ func testBytes(value byte, size int) []byte {
 		bz[i] = value
 	}
 	return bz
+}
+
+type blockingVerifyStore struct {
+	archive.ObjectStore
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingVerifyStore) Get(ctx context.Context, key string) ([]byte, error) {
+	if strings.Contains(key, "/segments/") {
+		s.once.Do(func() { close(s.started) })
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return s.ObjectStore.Get(ctx, key)
+}
+
+func TestLivePruneVerificationDoesNotBlockHotStore(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	dbDir := filepath.Join(t.TempDir(), "db")
+	createCLIBlockStoreFixture(t, dbDir, 5)
+	hot, err := archive.OpenCometBlockStore(dbDir, "goleveldb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hot.Close()
+	defer cancel()
+	ingestor, err := blocksyncarchive.NewHotIngestor(hot, blocksyncarchive.IngestOptions{ChainID: cliTestChainID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := archive.NewLocalObjectStore(filepath.Join(t.TempDir(), "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveOpts := archive.LiveArchiveOptions{
+		ChainID: cliTestChainID, Prefix: "archive", SegmentBlocks: 2, Compression: archive.CompressionGzip, ReadyHeight: 4,
+	}
+	archived, err := archive.ArchiveReady(ctx, hot, local, archiveOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := &blockingVerifyStore{ObjectStore: local, started: make(chan struct{}), release: make(chan struct{})}
+	stats := newLiveMaintenanceStats()
+	startLiveIngestorMaintenanceLoop(ctx, ingestor, objects, archiveOpts, 1, time.Hour, archive.PruneHotOptions{
+		ManifestKey: archived.ManifestKey, RetainBlocks: 1,
+		EvidenceMaxAgeBlocks: 1, EvidenceMaxAgeDuration: time.Nanosecond,
+	}, time.Hour, stats)
+	select {
+	case <-objects.started:
+	case <-time.After(time.Second):
+		t.Fatal("verification did not start")
+	}
+	assertHotStoreAvailable(t, ingestor)
+	close(objects.release)
+	deadline := time.After(time.Second)
+	for stats.snapshot()["prune_runs"] != int64(1) {
+		select {
+		case <-deadline:
+			t.Fatal("prune did not complete")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if got := stats.snapshot()[liveMetricPruneErrors]; got != int64(0) {
+		t.Fatalf("prune errors: %v", got)
+	}
+}
+
+func assertHotStoreAvailable(t *testing.T, ingestor *blocksyncarchive.HotIngestor) {
+	t.Helper()
+	readable := make(chan bool, 1)
+	go func() { readable <- ingestor.LoadBlock(3) != nil }()
+	select {
+	case ok := <-readable:
+		if !ok {
+			t.Fatal("hot block missing during verification")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("LoadBlock blocked during verification")
+	}
+	submitted := make(chan error, 1)
+	go func() { _, err := ingestor.Submit(makeCLITestBlock(6)); submitted <- err }()
+	select {
+	case err := <-submitted:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ingest blocked during verification")
+	}
 }

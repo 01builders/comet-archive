@@ -2,8 +2,11 @@ package archive
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	sm "github.com/cometbft/cometbft/state"
@@ -48,8 +51,19 @@ func PruneVerifiedHotStore(ctx context.Context, blockStore *store.BlockStore, ob
 	if verifyResult.BlocksChecked == 0 {
 		return PruneHotResult{}, errors.New("archive verification checked no blocks")
 	}
-	manifest, err := LoadManifest(ctx, objectStore, opts.ManifestKey)
-	if err != nil {
+	return PruneHotStore(ctx, blockStore, verifyResult.Manifest, opts)
+}
+
+// PruneHotStore applies a fully verified manifest snapshot. The caller must
+// serialize this operation with hot-store writes; verification needs no lock.
+func PruneHotStore(ctx context.Context, blockStore *store.BlockStore, manifest Manifest, opts PruneHotOptions) (PruneHotResult, error) {
+	if blockStore == nil {
+		return PruneHotResult{}, errors.New("block store is required")
+	}
+	if opts.RetainBlocks <= 0 {
+		return PruneHotResult{}, errors.New("retain blocks must be positive")
+	}
+	if err := ctx.Err(); err != nil {
 		return PruneHotResult{}, err
 	}
 	base := blockStore.Base()
@@ -72,9 +86,15 @@ func PruneVerifiedHotStore(ctx context.Context, blockStore *store.BlockStore, ob
 	if pruneTo > head {
 		pruneTo = head
 	}
+	if manifest.FirstHeight > base {
+		return PruneHotResult{}, fmt.Errorf("archive starts at %d after hot store base %d", manifest.FirstHeight, base)
+	}
 	state, err := pruneState(blockStore, opts)
 	if err != nil {
 		return PruneHotResult{}, err
+	}
+	if boundaryErr := validatePruneBoundary(blockStore, manifest, state.ChainID, pruneTo-1); boundaryErr != nil {
+		return PruneHotResult{}, boundaryErr
 	}
 	pruned, evidencePoint, err := blockStore.PruneBlocks(pruneTo, state)
 	if err != nil {
@@ -85,6 +105,34 @@ func PruneVerifiedHotStore(ctx context.Context, blockStore *store.BlockStore, ob
 	result.EvidenceRetains = evidencePoint
 	result.BaseAfter = blockStore.Base()
 	return result, nil
+}
+
+func validatePruneBoundary(blockStore *store.BlockStore, manifest Manifest, chainID string, height int64) error {
+	if manifest.ChainID != chainID {
+		return fmt.Errorf("archive chain ID %q does not match hot store chain ID %q", manifest.ChainID, chainID)
+	}
+	if height < manifest.FirstHeight || height > manifest.LastHeight {
+		return fmt.Errorf("prune boundary %d is outside archived range %d-%d", height, manifest.FirstHeight, manifest.LastHeight)
+	}
+	block := blockStore.LoadBlock(height)
+	if block == nil {
+		return fmt.Errorf("hot store prune boundary block %d is missing", height)
+	}
+	position := sort.Search(len(manifest.Segments), func(i int) bool {
+		return manifest.Segments[i].LastHeight >= height
+	})
+	if position == len(manifest.Segments) {
+		return fmt.Errorf("archive has no block index at prune boundary %d", height)
+	}
+	segment := manifest.Segments[position]
+	index := height - segment.FirstHeight
+	if index < 0 || index >= int64(len(segment.Blocks)) {
+		return fmt.Errorf("archive has no block index at prune boundary %d", height)
+	}
+	if !strings.EqualFold(hex.EncodeToString(block.Hash()), segment.Blocks[index].Hash) {
+		return fmt.Errorf("archive block hash at prune boundary %d does not match hot store", height)
+	}
+	return nil
 }
 
 func pruneState(blockStore *store.BlockStore, opts PruneHotOptions) (sm.State, error) {

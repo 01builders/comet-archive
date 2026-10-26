@@ -2,11 +2,15 @@ package archive
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 )
+
+var ErrManifestNotFound = errors.New("manifest not found")
 
 type VerifyOptions struct {
 	ManifestKey string
@@ -17,11 +21,33 @@ type VerifyOptions struct {
 }
 
 type VerifyResult struct {
+	Manifest        Manifest `json:"-"`
 	SegmentsChecked int
 	BlocksChecked   int
 }
 
 func Verify(ctx context.Context, store ObjectStore, opts VerifyOptions) (VerifyResult, error) {
+	return verifyArchive(ctx, store, opts, nil)
+}
+
+// IncrementalVerifier caches full verification of immutable segments for one
+// store and manifest. It must be used serially. Entries are bounded by the
+// current manifest, and all descriptor fields participate in cache identity.
+type IncrementalVerifier struct {
+	store       ObjectStore
+	manifestKey string
+	verified    map[string][sha256.Size]byte
+}
+
+func NewIncrementalVerifier(store ObjectStore, manifestKey string) *IncrementalVerifier {
+	return &IncrementalVerifier{store: store, manifestKey: manifestKey, verified: make(map[string][sha256.Size]byte)}
+}
+
+func (v *IncrementalVerifier) Verify(ctx context.Context) (VerifyResult, error) {
+	return verifyArchive(ctx, v.store, VerifyOptions{ManifestKey: v.manifestKey}, v.verified)
+}
+
+func verifyArchive(ctx context.Context, store ObjectStore, opts VerifyOptions, verified map[string][sha256.Size]byte) (VerifyResult, error) {
 	if opts.ManifestKey == "" {
 		return VerifyResult{}, errors.New("manifest key is required")
 	}
@@ -32,17 +58,57 @@ func Verify(ctx context.Context, store ObjectStore, opts VerifyOptions) (VerifyR
 		return VerifyResult{}, errors.New("object store is required")
 	}
 	manifest, err := LoadManifest(ctx, store, opts.ManifestKey)
+	if errors.Is(err, ErrObjectNotFound) {
+		return VerifyResult{}, fmt.Errorf("%w: %w", ErrManifestNotFound, err)
+	}
 	if err != nil {
 		return VerifyResult{}, err
 	}
-	if err := ctx.Err(); err != nil {
-		return VerifyResult{}, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return VerifyResult{}, contextErr
 	}
 	if len(manifest.Segments) == 0 {
-		return VerifyResult{}, nil
+		clear(verified)
+		return VerifyResult{Manifest: manifest}, nil
 	}
 
-	workers := min(segmentConcurrency(opts.Concurrency), len(manifest.Segments))
+	pending, fingerprints, err := pendingSegments(manifest, verified)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	result, err := verifySegments(ctx, store, opts, manifest, pending)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	if verified != nil {
+		clear(verified)
+		for key, fingerprint := range fingerprints {
+			verified[key] = fingerprint
+		}
+	}
+	result.Manifest = manifest
+	return result, nil
+}
+
+func pendingSegments(manifest Manifest, verified map[string][sha256.Size]byte) ([]int, map[string][sha256.Size]byte, error) {
+	pending := make([]int, 0, len(manifest.Segments))
+	fingerprints := make(map[string][sha256.Size]byte, len(manifest.Segments))
+	for i, segment := range manifest.Segments {
+		data, err := json.Marshal(segment)
+		if err != nil {
+			return nil, nil, err
+		}
+		fingerprint := sha256.Sum256(data)
+		fingerprints[segment.Key] = fingerprint
+		if previous, ok := verified[segment.Key]; !ok || previous != fingerprint {
+			pending = append(pending, i)
+		}
+	}
+	return pending, fingerprints, nil
+}
+
+func verifySegments(ctx context.Context, store ObjectStore, opts VerifyOptions, manifest Manifest, pending []int) (VerifyResult, error) {
+	workers := min(segmentConcurrency(opts.Concurrency), len(pending))
 
 	errs := make([]error, len(manifest.Segments))
 	var blocksChecked int64
@@ -73,7 +139,7 @@ func Verify(ctx context.Context, store ObjectStore, opts VerifyOptions) (VerifyR
 		})
 	}
 
-	for i := range manifest.Segments {
+	for _, i := range pending {
 		select {
 		case <-workerCtx.Done():
 			close(jobs)
