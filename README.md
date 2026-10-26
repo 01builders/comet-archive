@@ -82,20 +82,14 @@ a real bucket unless you intend to write archive objects there.
 
 ## Development
 
-This module currently uses the sibling CometBFT checkout declared in
-`go.mod`:
-
-```text
-replace github.com/cometbft/cometbft => ../cometbft
-```
-
-Use CometBFT commit `3b0311fc6a8c6b7024e3b1e226a5f9808ba3ccf1` for local and
-CI builds until this project is cut over to a tagged CometBFT release.
+CometBFT is pinned in `go.mod` to pseudo-version
+`v0.39.0-rc1.0.20260507140103-3b0311fc6a8c`, from public commit
+`3b0311fc6a8c6b7024e3b1e226a5f9808ba3ccf1`. Go downloads it as a normal
+module; local and CI builds need no separate CometBFT checkout.
 
 ```text
 make fmt
 make fmt-check
-make verify-cometbft
 make e2e-real-cometbft
 make test
 make lint
