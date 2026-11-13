@@ -142,7 +142,7 @@ func Hydrate(ctx context.Context, store ObjectStore, opts HydrateOptions) (Hydra
 
 	jobs := make(chan int)
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
+	for range workers {
 		wg.Go(func() {
 			for slot := range jobs {
 				if err := workerCtx.Err(); err != nil {

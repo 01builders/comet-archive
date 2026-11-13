@@ -337,11 +337,11 @@ func makeDirectoriesDurable(path string) error {
 		}
 		missing = append(missing, dir)
 	}
-	for i := len(missing) - 1; i >= 0; i-- {
-		if err := os.Mkdir(missing[i], 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+	for _, m := range slices.Backward(missing) {
+		if err := os.Mkdir(m, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
 			return err
 		}
-		if err := syncDirectory(filepath.Dir(missing[i])); err != nil {
+		if err := syncDirectory(filepath.Dir(m)); err != nil {
 			return err
 		}
 	}

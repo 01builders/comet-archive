@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 )
@@ -82,9 +83,7 @@ func verifyArchive(ctx context.Context, store ObjectStore, opts VerifyOptions, v
 	}
 	if verified != nil {
 		clear(verified)
-		for key, fingerprint := range fingerprints {
-			verified[key] = fingerprint
-		}
+		maps.Copy(verified, fingerprints)
 	}
 	result.Manifest = manifest
 	return result, nil
@@ -119,7 +118,7 @@ func verifySegments(ctx context.Context, store ObjectStore, opts VerifyOptions, 
 
 	jobs := make(chan int)
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
+	for range workers {
 		wg.Go(func() {
 			for i := range jobs {
 				if err := workerCtx.Err(); err != nil {

@@ -179,7 +179,7 @@ func verifyCompletedMigrationSegments(ctx context.Context, store ObjectStore, se
 	defer cancel()
 
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
+	for range workers {
 		wg.Go(func() {
 			for i := range jobs {
 				if err := workerCtx.Err(); err != nil {

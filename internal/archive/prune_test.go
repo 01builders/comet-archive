@@ -265,7 +265,7 @@ func TestIncrementalVerifyFetchesOnlyNewSegments(t *testing.T) {
 	hot, objects, archived, opts := pruneFixture(t)
 	counting := &countingGetStore{ObjectStore: objects, gets: make(map[string]int)}
 	verifier := NewIncrementalVerifier(counting, opts.ManifestKey)
-	for cycle := 0; cycle < 2; cycle++ {
+	for cycle := range 2 {
 		result, err := verifier.Verify(t.Context())
 		if err != nil {
 			t.Fatal(err)
