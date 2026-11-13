@@ -97,6 +97,9 @@ func pendingSegments(manifest Manifest, verified map[string][sha256.Size]byte) (
 		if err != nil {
 			return nil, nil, err
 		}
+		// The parent hash participates because verification links the
+		// segment's first block to its predecessor's last indexed block.
+		data = append(data, segmentParentHash(manifest, i)...)
 		fingerprint := sha256.Sum256(data)
 		fingerprints[segment.Key] = fingerprint
 		if previous, ok := verified[segment.Key]; !ok || previous != fingerprint {
@@ -126,7 +129,7 @@ func verifySegments(ctx context.Context, store ObjectStore, opts VerifyOptions, 
 					continue
 				}
 				segment := manifest.Segments[i]
-				blocks, err := verifySegment(workerCtx, store, segment, manifest.FirstHeight, opts.SampleEvery)
+				blocks, err := verifySegment(workerCtx, store, segment, segmentParentHash(manifest, i), manifest.FirstHeight, opts.SampleEvery)
 				if err != nil {
 					errs[i] = err
 					cancel()
@@ -162,9 +165,20 @@ func verifySegments(ctx context.Context, store ObjectStore, opts VerifyOptions, 
 	}, nil
 }
 
+// segmentParentHash is the indexed hash of the block preceding segment i, or ""
+// for the first segment, whose predecessor is not archived.
+func segmentParentHash(manifest Manifest, i int) string {
+	if i <= 0 {
+		return ""
+	}
+	return lastBlockHash(manifest.Segments[:i])
+}
+
 // verifySegment performs the per-segment verification work and returns the
-// number of blocks counted toward BlocksChecked.
-func verifySegment(ctx context.Context, store ObjectStore, segment SegmentManifest, manifestFirstHeight int64, sampleEvery int64) (int, error) {
+// number of blocks counted toward BlocksChecked. Every decoded block must
+// extend its predecessor, so a hash match at any archived height implies the
+// whole archived prefix matches.
+func verifySegment(ctx context.Context, store ObjectStore, segment SegmentManifest, parentHash string, manifestFirstHeight int64, sampleEvery int64) (int, error) {
 	info, err := store.Stat(ctx, segment.Key)
 	if err != nil {
 		return 0, fmt.Errorf("stat %s: %w", segment.Key, err)
@@ -176,10 +190,19 @@ func verifySegment(ctx context.Context, store ObjectStore, segment SegmentManife
 	if err != nil {
 		return 0, fmt.Errorf("get %s: %w", segment.Key, err)
 	}
+	// Decoded records already match the manifest index, so record i-1's hash is
+	// the expected parent of record i.
 	validateAllBlocks := sampleEvery <= 0
 	var validateRecord func(BlockRecord) error
 	if validateAllBlocks {
-		validateRecord = validateDecodedBlockRecord
+		parent := parentHash
+		validateRecord = func(record BlockRecord) error {
+			if err := validateLinkedRecord(record, parent); err != nil {
+				return err
+			}
+			parent = record.Hash
+			return nil
+		}
 	}
 	records, err := decodeSegmentRecords(data, segment, validateRecord)
 	if err != nil {
@@ -189,17 +212,29 @@ func verifySegment(ctx context.Context, store ObjectStore, segment SegmentManife
 		return len(records), nil
 	}
 	blocks := 0
-	for _, record := range records {
+	for i, record := range records {
 		if err := ctx.Err(); err != nil {
 			return 0, err
 		}
 		if (record.Height-manifestFirstHeight)%sampleEvery != 0 {
 			continue
 		}
-		if _, err := RecordToBlock(record); err != nil {
-			return 0, fmt.Errorf("block %d: %w", record.Height, err)
+		parent := parentHash
+		if i > 0 {
+			parent = records[i-1].Hash
+		}
+		if err := validateLinkedRecord(record, parent); err != nil {
+			return 0, fmt.Errorf("decode %s: %w", segment.Key, err)
 		}
 		blocks++
 	}
 	return blocks, nil
+}
+
+func validateLinkedRecord(record BlockRecord, parentHash string) error {
+	block, err := RecordToBlock(record)
+	if err != nil {
+		return fmt.Errorf("block %d: %w", record.Height, err)
+	}
+	return checkParentLink(block, parentHash)
 }

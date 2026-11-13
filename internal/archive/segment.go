@@ -334,6 +334,32 @@ func validateDecodedBlockRecord(record BlockRecord) error {
 	return err
 }
 
+// lastBlockHash returns the indexed hash of the final archived block, or ""
+// when there is no archived predecessor to link against.
+func lastBlockHash(segments []SegmentManifest) string {
+	if len(segments) == 0 {
+		return ""
+	}
+	blocks := segments[len(segments)-1].Blocks
+	if len(blocks) == 0 {
+		return ""
+	}
+	return blocks[len(blocks)-1].Hash
+}
+
+// checkParentLink requires block to extend the block hashed as parentHash. An
+// empty parentHash means the predecessor is not archived, so nothing is checked.
+func checkParentLink(block *ctypes.Block, parentHash string) error {
+	if parentHash == "" {
+		return nil
+	}
+	if got := hex.EncodeToString(block.LastBlockID.Hash); !strings.EqualFold(got, parentHash) {
+		return fmt.Errorf("block %d does not extend archived block %d: last block hash %q, expected %s",
+			block.Height, block.Height-1, got, parentHash)
+	}
+	return nil
+}
+
 func SegmentKey(prefix, chainID string, segment SegmentManifest) string {
 	shortHash := segment.SHA256
 	if len(shortHash) > 16 {

@@ -928,7 +928,7 @@ func TestVerifySampleEveryDecodesOnlySampledBlocks(t *testing.T) {
 	}
 	records := []BlockRecord{
 		makeTestRecord(t, 1),
-		{Height: 2, Hash: strings.Repeat("a", blockHashHexLen), Bytes: []byte("not a comet block")},
+		{Height: 2, Hash: makeTestRecord(t, 2).Hash, Bytes: []byte("not a comet block")},
 		makeTestRecord(t, 3),
 		makeTestRecord(t, 4),
 		makeTestRecord(t, 5),

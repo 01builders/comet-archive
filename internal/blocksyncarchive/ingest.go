@@ -21,8 +21,12 @@ const (
 )
 
 type IngestOptions struct {
-	ChainID            string
-	StartHeight        int64
+	ChainID     string
+	StartHeight int64
+	// ParentHash, when set, is the hex hash the block at StartHeight must
+	// reference as its LastBlockID while the hot store is empty. It anchors a
+	// fresh hot store to the archive tail so a fork cannot seed it.
+	ParentHash         string
 	SafetyWindow       int64
 	Validation         ValidationMode
 	Checkpoints        map[int64]string
@@ -83,6 +87,7 @@ type HotIngestor struct {
 	fetchedSets     map[int64]*types.ValidatorSet
 	fetchedHeights  []int64
 	verifiedThrough int64
+	parentHash      []byte
 }
 
 type HotBlockReader struct {
@@ -133,6 +138,13 @@ func NewHotIngestor(blockStore *store.BlockStore, opts IngestOptions) (*HotInges
 		return nil, errors.New("safety window cannot be negative")
 	}
 	ingestor := &HotIngestor{store: blockStore, opts: opts}
+	if opts.ParentHash != "" {
+		parent, err := hex.DecodeString(opts.ParentHash)
+		if err != nil || len(parent) != 32 {
+			return nil, fmt.Errorf("parent hash %q must be a 64-character hex hash", opts.ParentHash)
+		}
+		ingestor.parentHash = parent
+	}
 	// Recover authentication only from a matching checkpoint and its hash-linked
 	// predecessors. A restart must not promote an unverified persisted tail.
 	if opts.Validation == ValidationCheckpoint {
@@ -251,6 +263,8 @@ func (i *HotIngestor) Submit(block *types.Block) (IngestResult, error) {
 			if block.LastCommit == nil || !bytes.Equal(block.LastCommit.BlockID.Hash, previous.Hash()) {
 				return IngestResult{}, invalidBlock("block %d does not extend persisted head", block.Height)
 			}
+		} else if i.parentHash != nil && i.store.Height() == 0 && !bytes.Equal(block.LastBlockID.Hash, i.parentHash) {
+			return IngestResult{}, invalidBlock("block %d does not extend archived block %d", block.Height, block.Height-1)
 		}
 		i.pending = block
 		i.markCheckpoint(block)

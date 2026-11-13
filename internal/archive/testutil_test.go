@@ -2,6 +2,7 @@ package archive
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 
 	dbm "github.com/cometbft/cometbft-db"
@@ -12,10 +13,49 @@ import (
 
 const testChainID = "archive-test-chain"
 
+// testBlockIDs memoizes the deterministic hash-linked test chain by height.
+var (
+	testBlockIDsMu sync.Mutex
+	testBlockIDs   = map[int64]ctypes.BlockID{}
+)
+
+// makeTestBlock returns block height of a deterministic chain in which every
+// block's LastBlockID references its predecessor.
 func makeTestBlock(t *testing.T, height int64) *ctypes.Block {
+	t.Helper()
+	return makeUnlinkedTestBlock(t, height, testBlockID(t, height-1))
+}
+
+func testBlockID(t *testing.T, height int64) ctypes.BlockID {
+	t.Helper()
+	if height <= 0 {
+		return ctypes.BlockID{}
+	}
+	testBlockIDsMu.Lock()
+	defer testBlockIDsMu.Unlock()
+	from := height
+	for from > 0 {
+		if _, ok := testBlockIDs[from]; ok {
+			break
+		}
+		from--
+	}
+	for h := from + 1; h <= height; h++ {
+		block := makeUnlinkedTestBlock(t, h, testBlockIDs[h-1])
+		parts, err := block.MakePartSet(ctypes.BlockPartSizeBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testBlockIDs[h] = ctypes.BlockID{Hash: block.Hash(), PartSetHeader: parts.Header()}
+	}
+	return testBlockIDs[height]
+}
+
+func makeUnlinkedTestBlock(t *testing.T, height int64, parent ctypes.BlockID) *ctypes.Block {
 	t.Helper()
 	block := ctypes.MakeBlock(height, []ctypes.Tx{ctypes.Tx(fmt.Sprintf("tx-%d", height))}, &ctypes.Commit{}, nil)
 	block.ChainID = testChainID
+	block.LastBlockID = parent
 	block.ProposerAddress = bytesOf(byte(height), crypto.AddressSize)
 	block.ValidatorsHash = bytesOf(0x11, 32)
 	block.NextValidatorsHash = bytesOf(0x22, 32)

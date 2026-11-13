@@ -142,7 +142,7 @@ func ArchiveReady(ctx context.Context, reader BlockReader, store ObjectStore, op
 			return LiveArchiveResult{}, err
 		}
 		last := min(height+int64(opts.SegmentBlocks)-1, end)
-		segment, uploaded, err := buildAndUploadSegment(ctx, reader, store, opts.ChainID, opts.Prefix, opts.Compression, height, last)
+		segment, uploaded, err := buildAndUploadSegment(ctx, reader, store, opts.ChainID, opts.Prefix, opts.Compression, lastBlockHash(manifest.Segments), height, last)
 		if err != nil {
 			return LiveArchiveResult{}, err
 		}
@@ -185,6 +185,7 @@ func buildAndUploadSegment(
 	reader BlockReader,
 	store ObjectStore,
 	chainID, prefix, compression string,
+	parentHash string,
 	first int64,
 	last int64,
 ) (SegmentManifest, bool, error) {
@@ -200,11 +201,16 @@ func buildAndUploadSegment(
 		if block.ChainID != chainID {
 			return SegmentManifest{}, false, fmt.Errorf("source block at height %d has chain ID %q, expected %q", height, block.ChainID, chainID)
 		}
+		// A forked or corrupted source must never be published as a continuation.
+		if err := checkParentLink(block, parentHash); err != nil {
+			return SegmentManifest{}, false, err
+		}
 		record, err := BlockToRecord(block)
 		if err != nil {
 			return SegmentManifest{}, false, fmt.Errorf("encode block %d: %w", height, err)
 		}
 		records = append(records, record)
+		parentHash = record.Hash
 	}
 	data, segment, err := EncodeSegment(records, compression)
 	if err != nil {

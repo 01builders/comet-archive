@@ -131,7 +131,7 @@ func Migrate(ctx context.Context, reader BlockReader, store ObjectStore, opts Mi
 			return MigrationResult{}, ctxErr
 		}
 		last := min(height+int64(opts.SegmentBlocks)-1, end)
-		segment, uploaded, segErr := buildAndUploadSegment(ctx, reader, store, opts.ChainID, opts.Prefix, opts.Compression, height, last)
+		segment, uploaded, segErr := buildAndUploadSegment(ctx, reader, store, opts.ChainID, opts.Prefix, opts.Compression, lastBlockHash(state.Segments), height, last)
 		if segErr != nil {
 			return MigrationResult{}, segErr
 		}

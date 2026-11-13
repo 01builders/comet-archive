@@ -602,9 +602,15 @@ func newServeCommand() (*cobra.Command, error) {
 					}
 					validatorSetSource = source
 				}
+				startHeight := liveIngestStartHeight(blockStore, summary)
+				var parentHash string
+				if startHeight > 0 {
+					parentHash = summary.LastBlockHash
+				}
 				ingestor, err := blocksyncarchive.NewHotIngestor(blockStore, blocksyncarchive.IngestOptions{
 					ChainID:            flags.chainID,
-					StartHeight:        liveIngestStartHeight(blockStore, summary),
+					StartHeight:        startHeight,
+					ParentHash:         parentHash,
 					SafetyWindow:       safetyWindow,
 					Validation:         blocksyncarchive.ValidationMode(validationMode),
 					Checkpoints:        checkpoints,

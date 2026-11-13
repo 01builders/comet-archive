@@ -20,6 +20,8 @@ type InspectSummary struct {
 	Segments    int    `json:"segments"`
 	Blocks      int    `json:"blocks"`
 	SizeBytes   int64  `json:"size_bytes"`
+	// LastBlockHash is the indexed hash at LastHeight; a continuation must extend it.
+	LastBlockHash string `json:"last_block_hash,omitempty"`
 }
 
 func Inspect(ctx context.Context, store ObjectStore, manifestKey string) (InspectSummary, error) {
@@ -34,11 +36,12 @@ func Inspect(ctx context.Context, store ObjectStore, manifestKey string) (Inspec
 		return InspectSummary{}, err
 	}
 	summary := InspectSummary{
-		ManifestKey: manifestKey,
-		ChainID:     manifest.ChainID,
-		FirstHeight: manifest.FirstHeight,
-		LastHeight:  manifest.LastHeight,
-		Segments:    len(manifest.Segments),
+		ManifestKey:   manifestKey,
+		ChainID:       manifest.ChainID,
+		FirstHeight:   manifest.FirstHeight,
+		LastHeight:    manifest.LastHeight,
+		Segments:      len(manifest.Segments),
+		LastBlockHash: lastBlockHash(manifest.Segments),
 	}
 	for _, segment := range manifest.Segments {
 		summary.Blocks += len(segment.Blocks)

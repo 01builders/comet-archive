@@ -84,6 +84,10 @@ Each block record stores:
 Records are encoded with explicit lengths and checksummed at the segment level.
 The verifier reconstructs records through CometBFT protobuf decoding and
 validates height continuity, recorded block hashes, object size, and SHA-256.
+Each decoded block must reference its predecessor's indexed hash as
+`LastBlockID`, within and across segments, so a hash match at any archived
+height implies the archived prefix matches. Archiving and migration refuse to
+write a block that does not extend the archived tail.
 
 ## Manifest Format
 

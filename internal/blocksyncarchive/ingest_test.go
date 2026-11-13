@@ -3,6 +3,7 @@ package blocksyncarchive
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -423,4 +424,30 @@ func (s *mockValidatorSetSource) ValidatorSet(height int64) (*types.ValidatorSet
 	}
 	s.loads[height]++
 	return s.sets[height], nil
+}
+
+func TestHotIngestorAnchorsEmptyStoreToParentHash(t *testing.T) {
+	parent := makeIngestBlock(t, 4)
+	newIngestor := func(parentHash string) *HotIngestor {
+		t.Helper()
+		ingestor, err := NewHotIngestor(newTestBlockStore(t), IngestOptions{
+			ChainID:     ingestTestChainID,
+			StartHeight: 5,
+			ParentHash:  parentHash,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ingestor
+	}
+	if _, err := newIngestor(hex.EncodeToString(parent.Hash())).Submit(makeIngestBlock(t, 5)); err != nil {
+		t.Fatalf("anchored successor rejected: %v", err)
+	}
+	_, err := newIngestor(hex.EncodeToString(bytesOf(0xee, 32))).Submit(makeIngestBlock(t, 5))
+	if !errors.Is(err, ErrInvalidBlock) {
+		t.Fatalf("submit err=%v, want invalid block for unanchored successor", err)
+	}
+	if _, err := NewHotIngestor(newTestBlockStore(t), IngestOptions{ChainID: ingestTestChainID, ParentHash: "zz"}); err == nil {
+		t.Fatal("expected malformed parent hash to be rejected")
+	}
 }
