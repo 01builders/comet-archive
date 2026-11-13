@@ -34,6 +34,29 @@ type ValidatorSetSource interface {
 	ValidatorSet(height int64) (*types.ValidatorSet, error)
 }
 
+// ErrInvalidBlock marks a Submit rejection caused by the submitted block
+// itself, so its sender is at fault. Other Submit errors are local failures or
+// a PendingConflictError and must not be attributed to the sender.
+var ErrInvalidBlock = errors.New("invalid block")
+
+// PendingConflictError reports that a submitted block does not commit the
+// pending block. Both are self-consistent, so either may be forged: the pending
+// block is dropped and both heights must be refetched.
+type PendingConflictError struct {
+	PendingHeight int64
+	Err           error
+}
+
+func (e *PendingConflictError) Error() string {
+	return fmt.Sprintf("pending block %d conflicts with its successor: %v", e.PendingHeight, e.Err)
+}
+
+func (e *PendingConflictError) Unwrap() error { return e.Err }
+
+func invalidBlock(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrInvalidBlock, fmt.Sprintf(format, args...))
+}
+
 type IngestResult struct {
 	Accepted              int64
 	Persisted             int64
@@ -226,7 +249,7 @@ func (i *HotIngestor) Submit(block *types.Block) (IngestResult, error) {
 	if i.pending == nil {
 		if previous := i.store.LoadBlock(i.store.Height()); previous != nil {
 			if block.LastCommit == nil || !bytes.Equal(block.LastCommit.BlockID.Hash, previous.Hash()) {
-				return IngestResult{}, errors.New("block does not extend persisted head")
+				return IngestResult{}, invalidBlock("block %d does not extend persisted head", block.Height)
 			}
 		}
 		i.pending = block
@@ -234,6 +257,9 @@ func (i *HotIngestor) Submit(block *types.Block) (IngestResult, error) {
 		return i.withStoreState(result), nil
 	}
 	if err := i.persistPending(block); err != nil {
+		if _, ok := errors.AsType[*PendingConflictError](err); ok {
+			i.pending = nil
+		}
 		return IngestResult{}, err
 	}
 	result.Persisted = i.pending.Height
@@ -261,28 +287,28 @@ func (i *HotIngestor) PendingHeight() int64 {
 
 func (i *HotIngestor) validateBlock(block *types.Block) error {
 	if block == nil {
-		return errors.New("nil block")
+		return invalidBlock("nil block")
 	}
 	if block.ChainID != i.opts.ChainID {
-		return fmt.Errorf("block %d chain ID %q, expected %q", block.Height, block.ChainID, i.opts.ChainID)
+		return invalidBlock("block %d chain ID %q, expected %q", block.Height, block.ChainID, i.opts.ChainID)
 	}
 	if block.Height <= 0 {
-		return fmt.Errorf("invalid block height %d", block.Height)
+		return invalidBlock("invalid block height %d", block.Height)
 	}
 	if len(block.Hash()) == 0 {
-		return fmt.Errorf("block %d has empty hash", block.Height)
+		return invalidBlock("block %d has empty hash", block.Height)
 	}
 	if block.LastCommit != nil && block.Height > 1 && !block.LastBlockID.Equals(block.LastCommit.BlockID) {
-		return fmt.Errorf("block %d last block ID does not match last commit", block.Height)
+		return invalidBlock("block %d last block ID does not match last commit", block.Height)
 	}
 	if block.LastCommit == nil || !bytes.Equal(block.LastCommitHash, block.LastCommit.Hash()) {
-		return fmt.Errorf("block %d last commit hash mismatch", block.Height)
+		return invalidBlock("block %d last commit hash mismatch", block.Height)
 	}
 	if i.opts.Validation == ValidationCheckpoint {
 		if want, ok := i.opts.Checkpoints[block.Height]; ok {
 			got := strings.ToLower(hex.EncodeToString(block.Hash()))
 			if got != want {
-				return fmt.Errorf("block %d checkpoint hash mismatch: got %s want %s", block.Height, got, want)
+				return invalidBlock("block %d checkpoint hash mismatch: got %s want %s", block.Height, got, want)
 			}
 		}
 	}
@@ -297,7 +323,7 @@ func (i *HotIngestor) validateBlock(block *types.Block) error {
 		}
 		if vals != nil {
 			if !bytes.Equal(block.ValidatorsHash, vals.Hash()) {
-				return fmt.Errorf("block %d validators hash mismatch", block.Height)
+				return invalidBlock("block %d validators hash mismatch", block.Height)
 			}
 		}
 	}
@@ -324,21 +350,21 @@ func normalizeCheckpoints(checkpoints map[int64]string) (map[int64]string, error
 
 func (i *HotIngestor) persistPending(next *types.Block) error {
 	if next.LastCommit == nil {
-		return fmt.Errorf("block %d cannot commit pending block %d: nil last commit", next.Height, i.pending.Height)
+		return invalidBlock("block %d cannot commit pending block %d: nil last commit", next.Height, i.pending.Height)
 	}
 	if next.LastCommit.Height != i.pending.Height {
-		return fmt.Errorf("block %d last commit height %d, expected %d", next.Height, next.LastCommit.Height, i.pending.Height)
+		return invalidBlock("block %d last commit height %d, expected %d", next.Height, next.LastCommit.Height, i.pending.Height)
 	}
 	parts, err := i.pending.MakePartSet(types.BlockPartSizeBytes)
 	if err != nil {
 		return fmt.Errorf("make part set for block %d: %w", i.pending.Height, err)
 	}
 	if !bytes.Equal(next.LastCommit.BlockID.Hash, i.pending.Hash()) {
-		return fmt.Errorf("block %d last commit does not reference pending block %d", next.Height, i.pending.Height)
+		return i.pendingConflict(fmt.Errorf("block %d last commit does not reference pending block %d", next.Height, i.pending.Height))
 	}
 	if next.LastCommit.BlockID.PartSetHeader.Total != parts.Header().Total ||
 		!bytes.Equal(next.LastCommit.BlockID.PartSetHeader.Hash, parts.Header().Hash) {
-		return fmt.Errorf("block %d last commit part set does not reference pending block %d", next.Height, i.pending.Height)
+		return i.pendingConflict(fmt.Errorf("block %d last commit part set does not reference pending block %d", next.Height, i.pending.Height))
 	}
 	if i.opts.Validation == ValidationValidatorSet {
 		vals, err := i.validatorSetFor(i.pending.Height)
@@ -349,12 +375,25 @@ func (i *HotIngestor) persistPending(next *types.Block) error {
 			return fmt.Errorf("missing validator set for committed height %d", i.pending.Height)
 		}
 		blockID := types.BlockID{Hash: i.pending.Hash(), PartSetHeader: parts.Header()}
+		// The commit references the pending block, so a bad signature set is the
+		// successor's fault.
 		if err := vals.VerifyCommit(i.opts.ChainID, blockID, i.pending.Height, next.LastCommit); err != nil {
-			return fmt.Errorf("verify commit for block %d: %w", i.pending.Height, err)
+			return invalidBlock("verify commit for block %d: %v", i.pending.Height, err)
 		}
 	}
 	i.store.SaveBlock(i.pending, parts, next.LastCommit)
 	return nil
+}
+
+// pendingConflict attributes a link mismatch. Only a checkpoint-pinned pending
+// block is known authentic, which makes the successor provably at fault.
+func (i *HotIngestor) pendingConflict(err error) error {
+	if i.opts.Validation == ValidationCheckpoint {
+		if _, pinned := i.opts.Checkpoints[i.pending.Height]; pinned {
+			return fmt.Errorf("%w: %w", ErrInvalidBlock, err)
+		}
+	}
+	return &PendingConflictError{PendingHeight: i.pending.Height, Err: err}
 }
 
 func (i *HotIngestor) validatorSetFor(height int64) (*types.ValidatorSet, error) {

@@ -42,6 +42,9 @@ type RequestPlanner struct {
 	received map[int64]struct{}
 	noBlocks map[PeerID]map[int64]struct{}
 	timeouts map[PeerID]map[int64]struct{}
+	// suspects deprioritizes a peer for a height after an ambiguous rejection.
+	// Unlike timeouts it survives range updates, which arrive every status poll.
+	suspects map[PeerID]map[int64]struct{}
 }
 
 type inflightRequest struct {
@@ -56,6 +59,7 @@ func NewRequestPlanner() *RequestPlanner {
 		received: make(map[int64]struct{}),
 		noBlocks: make(map[PeerID]map[int64]struct{}),
 		timeouts: make(map[PeerID]map[int64]struct{}),
+		suspects: make(map[PeerID]map[int64]struct{}),
 	}
 }
 
@@ -83,6 +87,7 @@ func (p *RequestPlanner) RemovePeer(id PeerID) {
 	delete(p.peers, id)
 	delete(p.noBlocks, id)
 	delete(p.timeouts, id)
+	delete(p.suspects, id)
 	for height, inflight := range p.inflight {
 		if inflight.PeerID == id {
 			delete(p.inflight, height)
@@ -98,6 +103,18 @@ func (p *RequestPlanner) MarkDone(height int64) {
 func (p *RequestPlanner) MarkFailed(height int64) {
 	delete(p.inflight, height)
 	delete(p.received, height)
+}
+
+// MarkSuspect prefers other peers for height while any remain; the suspect
+// stays a fallback so a lone honest peer cannot be starved out.
+func (p *RequestPlanner) MarkSuspect(id PeerID, height int64) {
+	if id == "" || height <= 0 {
+		return
+	}
+	if p.suspects[id] == nil {
+		p.suspects[id] = make(map[int64]struct{})
+	}
+	p.suspects[id][height] = struct{}{}
 }
 
 func (p *RequestPlanner) MarkReceived(height int64) {
@@ -229,6 +246,12 @@ func (p *RequestPlanner) pruneMarkersBelow(height int64) {
 			delete(p.timeouts, peerID)
 		}
 	}
+	for peerID, heights := range p.suspects {
+		pruneHeightSet(heights, height)
+		if len(heights) == 0 {
+			delete(p.suspects, peerID)
+		}
+	}
 }
 
 func pruneHeightSet(heights map[int64]struct{}, below int64) {
@@ -247,7 +270,7 @@ func (p *RequestPlanner) peerForHeight(height int64) (PeerID, bool) {
 	slices.Sort(ids)
 	for _, id := range ids {
 		peerID := PeerID(id)
-		if p.peers[peerID].Contains(height) && !p.peerReturnedNoBlock(peerID, height) && !p.peerTimedOut(peerID, height) {
+		if p.peers[peerID].Contains(height) && !p.peerReturnedNoBlock(peerID, height) && !p.peerTimedOut(peerID, height) && !hasHeight(p.suspects[peerID], height) {
 			return peerID, true
 		}
 	}
@@ -265,6 +288,11 @@ func (p *RequestPlanner) peerReturnedNoBlock(peerID PeerID, height int64) bool {
 	if heights == nil {
 		return false
 	}
+	_, ok := heights[height]
+	return ok
+}
+
+func hasHeight(heights map[int64]struct{}, height int64) bool {
 	_, ok := heights[height]
 	return ok
 }
