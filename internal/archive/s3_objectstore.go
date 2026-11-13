@@ -366,7 +366,9 @@ func (s *S3ObjectStore) CompareAndSwap(ctx context.Context, key string, data []b
 			}
 			return aws.ToString(out.ETag), nil
 		}
-		if isS3AlreadyExists(err) {
+		// S3 answers If-Match on a deleted key with 404, not 412. The revision no
+		// longer exists either way, matching the local store's conflict.
+		if isS3AlreadyExists(err) || (revision != "" && isS3NotFound(err)) {
 			return "", ErrObjectConflict
 		}
 		var apiErr smithy.APIError

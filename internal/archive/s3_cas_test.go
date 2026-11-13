@@ -84,3 +84,35 @@ func TestS3ConditionalCreationRetryIsBounded(t *testing.T) {
 		t.Fatalf("canceled write: %v", checkErr)
 	}
 }
+
+func TestS3ConditionalReplaceOfDeletedObjectConflicts(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	var attempts atomic.Int64
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		if r.Method != http.MethodPut || r.Header.Get("If-Match") != `"gone"` {
+			t.Errorf("unexpected request %s If-Match=%q", r.Method, r.Header.Get("If-Match"))
+		}
+		writeS3Error(t, w, "NoSuchKey", http.StatusNotFound)
+	}))
+	t.Cleanup(endpoint.Close)
+	store, err := NewS3ObjectStore(t.Context(), "s3://bucket?endpoint="+url.QueryEscape(endpoint.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, checkErr := store.CompareAndSwap(t.Context(), "manifest.json", []byte("new"), `"gone"`); !errors.Is(checkErr, ErrObjectConflict) {
+		t.Fatalf("replace deleted object: %v", checkErr)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts=%d, want no retry", attempts.Load())
+	}
+	local, err := NewLocalObjectStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, checkErr := local.CompareAndSwap(t.Context(), "manifest.json", []byte("new"), "gone"); !errors.Is(checkErr, ErrObjectConflict) {
+		t.Fatalf("local replace of missing object: %v", checkErr)
+	}
+}

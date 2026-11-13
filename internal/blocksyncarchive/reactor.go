@@ -41,6 +41,9 @@ type Reactor struct {
 	peers             map[PeerID]p2p.Peer
 	bufferedResponses map[int64]bufferedBlockResponse
 	coldBudgets       map[PeerID]coldPeerBudget
+	// pendingPeer sent the ingestor's pending block; a conflict with its
+	// successor implicates it as much as the successor's sender.
+	pendingPeer PeerID
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -390,6 +393,9 @@ func (r *Reactor) enqueueColdBlockRequest(peer p2p.Peer, height int64) bool {
 	budget, ok := r.coldBudgets[id]
 	if !ok {
 		if len(r.coldBudgets) >= maxColdPeerBudgets {
+			r.sweepRefilledColdBudgetsLocked(now)
+		}
+		if len(r.coldBudgets) >= maxColdPeerBudgets {
 			r.coldRateLimited.Add(1)
 			r.mu.Unlock()
 			return false
@@ -497,21 +503,12 @@ func (r *Reactor) handleBlockResponse(peer p2p.Peer, msg *bcproto.BlockResponse)
 func (r *Reactor) submitAndDrainBuffered(peerID PeerID, block *types.Block) bool {
 	for block != nil {
 		if _, err := r.ingestor.Submit(block); err != nil {
-			r.mu.Lock()
-			r.planner.MarkFailed(block.Height)
-			delete(r.bufferedResponses, block.Height)
-			if peerID != "" {
-				r.planner.RemovePeer(peerID)
-				r.dropBufferedResponsesFromPeerLocked(peerID)
-			}
-			peer := r.peers[peerID]
-			delete(r.peers, peerID)
-			r.mu.Unlock()
-			r.disconnectPeer(peer, err)
+			r.handleSubmitError(peerID, block.Height, err)
 			r.planAndSend()
 			return false
 		}
 		r.mu.Lock()
+		r.pendingPeer = peerID
 		r.planner.MarkDone(block.Height)
 		delete(r.bufferedResponses, block.Height)
 		nextHeight := r.ingestor.NextHeight()
@@ -525,6 +522,40 @@ func (r *Reactor) submitAndDrainBuffered(peerID PeerID, block *types.Block) bool
 		r.mu.Unlock()
 	}
 	return true
+}
+
+// handleSubmitError disconnects only a provably faulty sender. A pending-link
+// conflict cannot tell which side lied, so both heights are refetched with the
+// two senders deprioritized; a local failure just retries.
+func (r *Reactor) handleSubmitError(peerID PeerID, height int64, err error) {
+	var conflict *PendingConflictError
+	r.mu.Lock()
+	r.planner.MarkFailed(height)
+	delete(r.bufferedResponses, height)
+	switch {
+	case errors.Is(err, ErrInvalidBlock):
+		var peer p2p.Peer
+		if peerID != "" {
+			r.planner.RemovePeer(peerID)
+			r.dropBufferedResponsesFromPeerLocked(peerID)
+			peer = r.peers[peerID]
+			delete(r.peers, peerID)
+		}
+		r.mu.Unlock()
+		r.disconnectPeer(peer, err)
+		return
+	case errors.As(err, &conflict):
+		r.planner.MarkFailed(conflict.PendingHeight)
+		r.planner.MarkSuspect(r.pendingPeer, conflict.PendingHeight)
+		r.planner.MarkSuspect(peerID, height)
+		r.pendingPeer = ""
+		r.mu.Unlock()
+		r.Logger.Info("pending block conflict; refetching", "height", conflict.PendingHeight, "peer", peerID, "err", err)
+		return
+	default:
+		r.mu.Unlock()
+		r.Logger.Error("local block ingest failure", "height", height, "peer", peerID, "err", err)
+	}
 }
 
 func (r *Reactor) handleStatus(peer p2p.Peer, msg *bcproto.StatusResponse) {
@@ -728,6 +759,18 @@ func (r *Reactor) dropBufferedResponsesOutsideRangeLocked(peerID PeerID, adverti
 		if buffered.peerID == peerID && !advertised.Contains(height) {
 			delete(r.bufferedResponses, height)
 			r.planner.MarkFailed(height)
+		}
+	}
+}
+
+// sweepRefilledColdBudgetsLocked drops budgets that have refilled to burst.
+// Such an entry is indistinguishable from a new one, so dropping it is lossless
+// and reclaims entries for peers whose requests raced with RemovePeer.
+func (r *Reactor) sweepRefilledColdBudgetsLocked(now time.Time) {
+	const refill = time.Duration(coldPeerBurst * float64(time.Second) / coldPeerRequestsPerSecond)
+	for id, budget := range r.coldBudgets {
+		if now.Sub(budget.updated) >= refill {
+			delete(r.coldBudgets, id)
 		}
 	}
 }
